@@ -1,6 +1,8 @@
-import { createDeck, jokerToTrumpSuit, isJoker, formatCard, sortCardsForDisplay, canBeat, canPlayCard, mustFollowSuit, isCombo, canPlayCombo, canBeatCombo, canBeatComboDebug, getComboPlayOrder, suitToIcon } from './cards';
+import { createDeck, jokerToTrumpSuit, isJoker, formatCard, sortCardsForDisplay, canBeat, canPlayCard, mustFollowSuit, isCombo, canPlayCombo, canBeatCombo, canBeatComboByPosition, getComboPlayOrder, suitToIcon } from './cards';
 import { chooseBotResponse } from './bot';
+import { HAND_SIZE, COMBO_SIZES } from './constants';
 
+// Helper: Deal cards from deck
 function deal(deck, count) {
   const hand = [];
   for (let i = 0; i < count && deck.length > 0; i++) {
@@ -9,17 +11,142 @@ function deal(deck, count) {
   return hand;
 }
 
+// Helper: Draw cards to maintain hand size
+function drawCardsToHandSize(deck, hand, trumpCard, targetSize = HAND_SIZE) {
+  const newDeck = [...deck];
+  const newHand = [...hand];
+  let trumpCardWasDrawn = false;
+  
+  while (newDeck.length > 0 && newHand.length < targetSize) {
+    const drawnCard = newDeck.pop();
+    newHand.push(drawnCard);
+    
+    // Check if the trump card was just drawn (compare by rank and suit)
+    if (drawnCard.rank === trumpCard.rank && drawnCard.suit === trumpCard.suit) {
+      trumpCardWasDrawn = true;
+    }
+  }
+  
+  return { newDeck, newHand, trumpCardWasDrawn };
+}
+
+// Helper: Remove cards from hand by indices
+function removeCardsFromHand(hand, indices) {
+  const newHand = [...hand];
+  // Remove in reverse order to maintain correct indices
+  [...indices].sort((a, b) => b - a).forEach(idx => newHand.splice(idx, 1));
+  return newHand;
+}
+
+// Helper: Determine trick winner
+function determineTrickWinner(leadCard, responseCard, trumpSuit) {
+  if (Array.isArray(leadCard) && Array.isArray(responseCard)) {
+    // Combo vs combo
+    return canBeatComboByPosition(leadCard, responseCard, trumpSuit);
+  } else if (!Array.isArray(leadCard) && Array.isArray(responseCard)) {
+    // Single card vs combo - combo wins if highest card beats the single
+    const sortedCombo = getComboPlayOrder(responseCard, trumpSuit);
+    return canBeat(leadCard, sortedCombo[sortedCombo.length - 1], trumpSuit);
+  } else if (Array.isArray(leadCard) && !Array.isArray(responseCard)) {
+    // Combo vs single card - combo always wins
+    return false;
+  } else {
+    // Single card vs single card
+    return canBeat(leadCard, responseCard, trumpSuit);
+  }
+}
+
+// Helper: Check if game is won
+function checkWinCondition(hand) {
+  return hand.length === 0;
+}
+
+// Helper: Handle bot playing a card (single or combo)
+function playBotCard(state, choice) {
+  let newBotHand, newPile, newLastPlay, newLog;
+  
+  if (Array.isArray(choice)) {
+    // Bot played a combo
+    const indices = choice.map(card => state.hands.bot.findIndex(c => c === card)).filter(idx => idx >= 0);
+    newBotHand = removeCardsFromHand(state.hands.bot, indices);
+    newPile = [...state.pile, ...choice];
+    newLastPlay = { ...state.lastPlay, bot: choice };
+    newLog = [...state.log, `Bot played combo`];
+  } else {
+    // Bot played a single card
+    const idx = state.hands.bot.findIndex(c => c === choice);
+    newBotHand = removeCardsFromHand(state.hands.bot, [idx]);
+    newPile = [...state.pile, choice];
+    newLastPlay = { ...state.lastPlay, bot: choice };
+    newLog = [...state.log, `Bot played ${formatCard(choice)}`];
+  }
+  
+  return { newBotHand, newPile, newLastPlay, newLog, playedCard: choice };
+}
+
+// Helper: Handle bot leading after winning trick
+function handleBotLead(state, botHand, deadPile, log) {
+  const nextChoice = chooseBotResponse(null, botHand, state.trumpSuit, state.trumpCardDrawn);
+  if (!nextChoice) {
+    // Bot can't lead (shouldn't happen), pass turn to human
+    return {
+      ...state,
+      pile: [],
+      deadPile,
+      hands: { ...state.hands, bot: botHand },
+      turn: 'human',
+      leadCard: null,
+      log
+    };
+  }
+  
+  const { newBotHand, newPile, newLastPlay, newLog } = playBotCard(
+    { ...state, hands: { ...state.hands, bot: botHand } }, 
+    nextChoice
+  );
+  
+  // Check for win condition
+  const newWinner = checkWinCondition(newBotHand) ? 'bot' : null;
+  
+  // Draw cards (but not if bot already won)
+  const { newDeck, newHand: finalBotHand, trumpCardWasDrawn } = newWinner
+    ? { newDeck: [...state.deck], newHand: newBotHand, trumpCardWasDrawn: false }
+    : drawCardsToHandSize(state.deck, newBotHand, state.trumpCard);
+  
+  // Update log if trump card was drawn
+  const finalLog = trumpCardWasDrawn && !state.trumpCardDrawn
+    ? [...newLog, `Bot drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`]
+    : newLog;
+  
+  return {
+    ...state,
+    deck: newDeck,
+    pile: newPile,
+    deadPile,
+    hands: { ...state.hands, bot: finalBotHand },
+    turn: 'human',
+    leadCard: nextChoice,
+    lastPlay: newLastPlay,
+    log: finalLog,
+    winner: newWinner,
+    trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
+  };
+}
+
 export function initGame() {
   const deck = createDeck();
-  const human = deal(deck, 5);
-  const bot = deal(deck, 5);
-  const trumpCard = deck.pop(); // Trump card stays under deck
+  const human = deal(deck, HAND_SIZE);
+  const bot = deal(deck, HAND_SIZE);
+  // Trump card is now the last card in the deck (will be drawn last)
+  const trumpCard = deck[0]; // Peek at the bottom card without removing it
   let trumpSuit = trumpCard?.suit || jokerToTrumpSuit(trumpCard);
   const log = [];
-  log.push(`Trump is ${trumpSuit || 'None'} from ${formatCard(trumpCard)} (card remains under deck)`);
+  log.push(`Trump is ${trumpSuit || 'None'} from ${formatCard(trumpCard)} (card remains under deck, will be drawn last)`);
+  log.push(`5-card combos will be unlocked when the trump card is drawn!`);
   return {
     deck,
-    trumpCard, // Keep trump card separate
+    trumpCard, // Keep trump card reference (it's at deck[0])
+    trumpCardDrawn: false, // Track when trump card is drawn
     pile: [],
     deadPile: [],
     trumpSuit: trumpSuit || 'H',
@@ -62,30 +189,31 @@ export function gameReducer(state, action) {
     }
     
     // Create new state with card removed from hand
-    const newHumanHand = [...state.hands.human];
-    newHumanHand.splice(idx, 1);
+    const newHumanHand = removeCardsFromHand(state.hands.human, [idx]);
     const newPile = [...state.pile, card];
     const newLastPlay = { ...state.lastPlay, human: card };
     
-    // Draw cards to maintain 5 cards until deck is exhausted
-    const newDeck = [...state.deck];
-    const newHumanHandAfterDraw = [...newHumanHand];
-    while (newDeck.length > 0 && newHumanHandAfterDraw.length < 5) {
-      newHumanHandAfterDraw.push(newDeck.pop());
-    }
+    // Check for win condition BEFORE drawing
+    const newWinner = checkWinCondition(newHumanHand) ? 'human' : state.winner;
+    
+    // Draw cards to maintain hand size (but not if player already won)
+    const { newDeck, newHand: newHumanHandAfterDraw, trumpCardWasDrawn } = newWinner 
+      ? { newDeck: [...state.deck], newHand: newHumanHand, trumpCardWasDrawn: false }
+      : drawCardsToHandSize(state.deck, newHumanHand, state.trumpCard);
     
     if (state.leadCard) {
       // Human is responding - resolve the trick
-      const humanWon = canBeat(state.leadCard, card, state.trumpSuit);
+      const humanWon = determineTrickWinner(state.leadCard, card, state.trumpSuit);
       const winner = humanWon ? 'human' : 'bot';
-      const newLog = [...state.log, `You played ${formatCard(card)} and ${humanWon ? 'won' : 'lost'} the trick`];
+      let newLog = [...state.log, `You played ${formatCard(card)} and ${humanWon ? 'won' : 'lost'} the trick`];
+      
+      // Add trump card message if it was just drawn
+      if (trumpCardWasDrawn && !state.trumpCardDrawn) {
+        newLog = [...newLog, `You drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+      }
       
       // Move all cards from pile to dead pile
       const newDeadPile = [...state.deadPile, ...newPile];
-      
-      // Check for win condition
-      let newWinner = state.winner;
-      if (newHumanHandAfterDraw.length === 0) newWinner = 'human';
       
       return {
         ...state,
@@ -97,11 +225,18 @@ export function gameReducer(state, action) {
         leadCard: null,
         lastPlay: newLastPlay,
         log: newLog,
-        winner: newWinner
+        winner: newWinner,
+        trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
       };
     } else {
       // Human is leading
-      const newLog = [...state.log, `You led ${formatCard(card)}`];
+      let newLog = [...state.log, `You led ${formatCard(card)}`];
+      
+      // Add trump card message if it was just drawn
+      if (trumpCardWasDrawn && !state.trumpCardDrawn) {
+        newLog = [...newLog, `You drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+      }
+      
       return {
         ...state,
         deck: newDeck,
@@ -110,70 +245,68 @@ export function gameReducer(state, action) {
         turn: 'bot',
         leadCard: card,
         lastPlay: newLastPlay,
-        log: newLog
+        log: newLog,
+        winner: newWinner,
+        trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
       };
     }
   }
   case 'HUMAN_PLAY_COMBO': {
     const indices = action.indices;
     const combo = indices.map(idx => state.hands.human[idx]).filter(card => card);
-    if (combo.length !== 3 && combo.length !== 5) return state;
+    if (combo.length !== COMBO_SIZES.SMALL && combo.length !== COMBO_SIZES.LARGE) return state;
     
-    // Validate the combo
-    if (!isCombo(combo)) {
-      return { ...state, log: [...state.log, `Invalid combo: must be 2 same numbers + any other card`] };
+    // Check if 5-card combos are allowed (only after trump card is drawn)
+    // Exception: can respond to a 5-card combo even if trump card not drawn
+    if (combo.length === COMBO_SIZES.LARGE && !state.trumpCardDrawn) {
+      const isRespondingTo5CardCombo = state.leadCard && isCombo(state.leadCard) && state.leadCard.length === COMBO_SIZES.LARGE;
+      if (!isRespondingTo5CardCombo) {
+        return { ...state, log: [...state.log, `5-card combos are locked until the trump card is drawn!`] };
+      }
     }
     
-    if (!canPlayCombo(state.leadCard, combo, state.hands.human, state.trumpSuit)) {
-      if (state.leadCard && isCombo(state.leadCard)) {
-        // Get detailed debug info for combo vs combo
-        const debug = canBeatComboDebug(state.leadCard, combo, state.trumpSuit);
-        if (debug.reason === 'Different combo sizes') {
-          return { ...state, log: [...state.log, `Cannot play ${combo.length}-card combo against ${state.leadCard.length}-card combo`] };
-        } else if (debug.reason.includes('Card')) {
-          return { ...state, log: [...state.log, `Combo cannot beat lead combo: ${debug.reason}`] };
-        } else {
-          return { ...state, log: [...state.log, `Must play a combo that beats the lead combo: ${debug.reason}`] };
-        }
-      } else if (state.leadCard) {
-        return { ...state, log: [...state.log, `Must play a combo that beats ${formatCard(state.leadCard)}`] };
+    // When responding to a combo, use position-based matching
+    if (state.leadCard && isCombo(state.leadCard)) {
+      // Responding to combo - validate with position-based comparison
+      if (!canBeatComboByPosition(state.leadCard, combo, state.trumpSuit)) {
+        return { ...state, log: [...state.log, `Cannot beat lead combo - check your card positions!`] };
       }
-      return { ...state, log: [...state.log, `Invalid combo play`] };
+    } else if (state.leadCard) {
+      // Responding to a single card - combos are not allowed
+      return { ...state, log: [...state.log, `Cannot play combo when responding to a single card - play a single card instead`] };
+    } else {
+      // Leading with combo - must be a valid combo
+      if (!isCombo(combo)) {
+        return { ...state, log: [...state.log, `Invalid combo: must have at least 2 cards of same rank (3-card) or 4 cards in pairs (5-card)`] };
+      }
     }
     
     // Create new state with combo cards removed from hand
-    const newHumanHand = [...state.hands.human];
-    // Remove cards in reverse order to maintain correct indices
-    indices.sort((a, b) => b - a).forEach(idx => newHumanHand.splice(idx, 1));
+    const newHumanHand = removeCardsFromHand(state.hands.human, indices);
     const newPile = [...state.pile, ...combo];
     const newLastPlay = { ...state.lastPlay, human: combo };
     
-    // Draw cards to maintain 5 cards until deck is exhausted
-    const newDeck = [...state.deck];
-    const newHumanHandAfterDraw = [...newHumanHand];
-    while (newDeck.length > 0 && newHumanHandAfterDraw.length < 5) {
-      newHumanHandAfterDraw.push(newDeck.pop());
-    }
+    // Check for win condition BEFORE drawing
+    const newWinner = checkWinCondition(newHumanHand) ? 'human' : state.winner;
+    
+    // Draw cards to maintain hand size (but not if player already won)
+    const { newDeck, newHand: newHumanHandAfterDraw, trumpCardWasDrawn } = newWinner
+      ? { newDeck: [...state.deck], newHand: newHumanHand, trumpCardWasDrawn: false }
+      : drawCardsToHandSize(state.deck, newHumanHand, state.trumpCard);
     
     if (state.leadCard) {
       // Human is responding - resolve the trick
-      let humanWon;
-      if (isCombo(state.leadCard)) {
-        humanWon = canBeatCombo(state.leadCard, combo, state.trumpSuit);
-        } else {
-          // Single card vs combo - combo wins if highest card beats the single card
-          const sortedCombo = getComboPlayOrder(combo, state.trumpSuit);
-          humanWon = canBeat(state.leadCard, sortedCombo[sortedCombo.length - 1], state.trumpSuit); // Highest card
-        }
+      const humanWon = determineTrickWinner(state.leadCard, combo, state.trumpSuit);
       const winner = humanWon ? 'human' : 'bot';
-      const newLog = [...state.log, `You played combo and ${humanWon ? 'won' : 'lost'} the trick`];
+      let newLog = [...state.log, `You played combo and ${humanWon ? 'won' : 'lost'} the trick`];
+      
+      // Add trump card message if it was just drawn
+      if (trumpCardWasDrawn && !state.trumpCardDrawn) {
+        newLog = [...newLog, `You drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+      }
       
       // Move all cards from pile to dead pile
       const newDeadPile = [...state.deadPile, ...newPile];
-      
-      // Check for win condition
-      let newWinner = state.winner;
-      if (newHumanHandAfterDraw.length === 0) newWinner = 'human';
       
       return {
         ...state,
@@ -185,11 +318,18 @@ export function gameReducer(state, action) {
         leadCard: null,
         lastPlay: newLastPlay,
         log: newLog,
-        winner: newWinner
+        winner: newWinner,
+        trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
       };
     } else {
       // Human is leading with combo
-      const newLog = [...state.log, `You led combo`];
+      let newLog = [...state.log, `You led combo`];
+      
+      // Add trump card message if it was just drawn
+      if (trumpCardWasDrawn && !state.trumpCardDrawn) {
+        newLog = [...newLog, `You drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+      }
+      
       return {
         ...state,
         deck: newDeck,
@@ -198,7 +338,9 @@ export function gameReducer(state, action) {
         turn: 'bot',
         leadCard: combo,
         lastPlay: newLastPlay,
-        log: newLog
+        log: newLog,
+        winner: newWinner,
+        trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
       };
     }
   }
@@ -212,9 +354,7 @@ export function gameReducer(state, action) {
     const newHumanHand = [...state.hands.human, ...state.pile];
     const newLog = [...state.log, `You picked up the pile - your turn is skipped`];
     
-    // Check for win condition
-    let newWinner = state.winner;
-    if (newHumanHand.length === 0) newWinner = 'human';
+    // No need to check win condition here - player is gaining cards, not losing them
     
     return {
       ...state,
@@ -222,8 +362,7 @@ export function gameReducer(state, action) {
       pile: [],
       leadCard: null,
       turn: 'bot',
-      log: newLog,
-      winner: newWinner
+      log: newLog
     };
   }
   case 'HUMAN_EXCHANGE_TRUMP': {
@@ -239,178 +378,36 @@ export function gameReducer(state, action) {
     const newHumanHand = state.hands.human.filter(card => card !== sevenOfTrump);
     newHumanHand.push(state.trumpCard);
     
-    const newLog = [...state.log, `You exchanged 7${suitToIcon(state.trumpSuit)} for ${formatCard(state.trumpCard)}`];
+    let newLog = [...state.log, `You exchanged 7${suitToIcon(state.trumpSuit)} for ${formatCard(state.trumpCard)}`];
+    
+    // Exchanging the trump card counts as drawing it
+    if (!state.trumpCardDrawn) {
+      newLog = [...newLog, `5-card combos are now allowed!`];
+    }
+    
+    // Update deck to replace trump card at bottom with the 7
+    const newDeck = [...state.deck];
+    newDeck[0] = sevenOfTrump;
     
     return {
       ...state,
+      deck: newDeck,
       hands: { ...state.hands, human: newHumanHand },
       trumpCard: sevenOfTrump,
+      trumpCardDrawn: true, // Trump card is now in play
       log: newLog
     };
   }
   case 'BOT_ACT': {
     if (state.turn !== 'bot') return state;
-    const choice = chooseBotResponse(state.leadCard, state.hands.bot, state.trumpSuit);
-    if (choice) {
-      let newBotHand, newPile, newLastPlay, newLog;
-      
-      if (Array.isArray(choice)) {
-        // Bot played a combo
-        const combo = choice;
-        const indices = combo.map(card => state.hands.bot.findIndex(c => c === card)).filter(idx => idx >= 0);
-        newBotHand = [...state.hands.bot];
-        // Remove cards in reverse order to maintain correct indices
-        indices.sort((a, b) => b - a).forEach(idx => newBotHand.splice(idx, 1));
-        newPile = [...state.pile, ...combo];
-        newLastPlay = { ...state.lastPlay, bot: combo };
-        newLog = [...state.log, `Bot played combo`];
-      } else {
-        // Bot played a single card
-        const idx = state.hands.bot.findIndex(c => c === choice);
-        newBotHand = [...state.hands.bot];
-        newBotHand.splice(idx, 1);
-        newPile = [...state.pile, choice];
-        newLastPlay = { ...state.lastPlay, bot: choice };
-        newLog = [...state.log, `Bot played ${formatCard(choice)}`];
-      }
-      
-      // Draw cards to maintain 5 cards until deck is exhausted
-      const newDeck = [...state.deck];
-      const newBotHandAfterDraw = [...newBotHand];
-      while (newDeck.length > 0 && newBotHandAfterDraw.length < 5) {
-        newBotHandAfterDraw.push(newDeck.pop());
-      }
-      
-      if (state.leadCard) {
-        // Bot is responding - resolve the trick
-        let botWon;
-        if (Array.isArray(choice)) {
-          // Bot played combo
-          if (isCombo(state.leadCard)) {
-            botWon = canBeatCombo(state.leadCard, choice, state.trumpSuit);
-            } else {
-              // Single card vs combo - combo wins if highest card beats the single card
-              const sortedCombo = getComboPlayOrder(choice, state.trumpSuit);
-              botWon = canBeat(state.leadCard, sortedCombo[sortedCombo.length - 1], state.trumpSuit); // Highest card
-            }
-        } else {
-          // Bot played single card
-          if (isCombo(state.leadCard)) {
-            // Combo vs single card - combo wins
-            botWon = false;
-          } else {
-            botWon = canBeat(state.leadCard, choice, state.trumpSuit);
-          }
-        }
-        const winner = botWon ? 'bot' : 'human';
-        const finalLog = [...newLog, `${winner === 'human' ? 'You' : 'Bot'} won the trick`];
-        
-        // Move all cards from pile to dead pile
-        const newDeadPile = [...state.deadPile, ...newPile];
-        
-        // Check for win condition
-        let newWinner = state.winner;
-        if (newBotHandAfterDraw.length === 0) newWinner = 'bot';
-        
-        if (winner === 'bot') {
-          // Bot won the trick, they should lead next
-          // Immediately handle the bot's next lead
-          const nextChoice = chooseBotResponse(null, newBotHandAfterDraw, state.trumpSuit);
-          if (nextChoice) {
-            let finalBotHand, finalPile, finalLastPlay, finalLogWithLead;
-            
-            if (Array.isArray(nextChoice)) {
-              // Bot led with combo
-              const combo = nextChoice;
-              const indices = combo.map(card => newBotHandAfterDraw.findIndex(c => c === card)).filter(idx => idx >= 0);
-              finalBotHand = [...newBotHandAfterDraw];
-              indices.sort((a, b) => b - a).forEach(idx => finalBotHand.splice(idx, 1));
-              finalPile = [...combo];
-              finalLastPlay = { ...newLastPlay, bot: combo };
-              finalLogWithLead = [...finalLog, `Bot led combo`];
-            } else {
-              // Bot led with single card
-              const nextIdx = newBotHandAfterDraw.findIndex(c => c === nextChoice);
-              finalBotHand = [...newBotHandAfterDraw];
-              finalBotHand.splice(nextIdx, 1);
-              finalPile = [nextChoice];
-              finalLastPlay = { ...newLastPlay, bot: nextChoice };
-              finalLogWithLead = [...finalLog, `Bot led ${formatCard(nextChoice)}`];
-            }
-            
-            // Draw cards to maintain 5 cards until deck is exhausted
-            const finalDeck = [...newDeck];
-            const finalBotHandAfterDraw = [...finalBotHand];
-            while (finalDeck.length > 0 && finalBotHandAfterDraw.length < 5) {
-              finalBotHandAfterDraw.push(finalDeck.pop());
-            }
-            
-            return {
-              ...state,
-              deck: finalDeck,
-              pile: finalPile,
-              deadPile: newDeadPile,
-              hands: { ...state.hands, bot: finalBotHandAfterDraw },
-              turn: 'human',
-              leadCard: nextChoice,
-              lastPlay: finalLastPlay,
-              log: finalLogWithLead,
-              winner: newWinner
-            };
-          } else {
-            // Bot can't lead (shouldn't happen), pass turn to human
-            return {
-              ...state,
-              deck: newDeck,
-              pile: [],
-              deadPile: newDeadPile,
-              hands: { ...state.hands, bot: newBotHandAfterDraw },
-              turn: 'human',
-              leadCard: null,
-              lastPlay: newLastPlay,
-              log: finalLog,
-              winner: newWinner
-            };
-          }
-        } else {
-          // Human won the trick
-          return {
-            ...state,
-            deck: newDeck,
-            pile: [],
-            deadPile: newDeadPile,
-            hands: { ...state.hands, bot: newBotHandAfterDraw },
-            turn: 'human',
-            leadCard: null,
-            lastPlay: newLastPlay,
-            log: finalLog,
-            winner: newWinner
-          };
-        }
-      } else {
-        // Bot is leading
-        const finalLog = [...newLog, Array.isArray(choice) ? `Bot led combo` : `Bot led ${formatCard(choice)}`];
-        return {
-          ...state,
-          deck: newDeck,
-          pile: newPile,
-          hands: { ...state.hands, bot: newBotHandAfterDraw },
-          turn: 'human',
-          leadCard: choice,
-          lastPlay: newLastPlay,
-          log: finalLog
-        };
-      }
-    } else {
+    const choice = chooseBotResponse(state.leadCard, state.hands.bot, state.trumpSuit, state.trumpCardDrawn);
+    
+    if (!choice) {
       // Bot picks up (only when responding, not when leading)
-      if (!state.leadCard) return state; // Can't pick up when leading
+      if (!state.leadCard) return state;
       
       const newBotHand = [...state.hands.bot, ...state.pile];
       const newLog = [...state.log, `Bot picked up the pile`];
-      
-      // Check for win condition
-      let newWinner = state.winner;
-      if (newBotHand.length === 0) newWinner = 'bot';
       
       return {
         ...state,
@@ -418,8 +415,79 @@ export function gameReducer(state, action) {
         pile: [],
         leadCard: null,
         turn: 'human',
-        log: newLog,
-        winner: newWinner
+        log: newLog
+      };
+    }
+    
+    // Bot plays a card
+    const { newBotHand, newPile, newLastPlay, newLog } = playBotCard(state, choice);
+    
+    // Check for win condition BEFORE drawing
+    const newWinner = checkWinCondition(newBotHand) ? 'bot' : state.winner;
+    
+    // Draw cards (but not if bot already won)
+    const { newDeck, newHand: newBotHandAfterDraw, trumpCardWasDrawn } = newWinner
+      ? { newDeck: [...state.deck], newHand: newBotHand, trumpCardWasDrawn: false }
+      : drawCardsToHandSize(state.deck, newBotHand, state.trumpCard);
+    
+    if (state.leadCard) {
+      // Bot is responding - resolve the trick
+      const botWon = determineTrickWinner(state.leadCard, choice, state.trumpSuit);
+      const winner = botWon ? 'bot' : 'human';
+      let finalLog = [...newLog, `${winner === 'human' ? 'You' : 'Bot'} won the trick`];
+      
+      // Add trump card message if it was just drawn
+      if (trumpCardWasDrawn && !state.trumpCardDrawn) {
+        finalLog = [...finalLog, `Bot drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+      }
+      
+      // Move all cards from pile to dead pile
+      const newDeadPile = [...state.deadPile, ...newPile];
+      
+      if (winner === 'bot') {
+        // Bot won the trick, immediately lead next
+        return handleBotLead(
+          { ...state, deck: newDeck, trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn },
+          newBotHandAfterDraw,
+          newDeadPile,
+          finalLog
+        );
+      } else {
+        // Human won the trick
+        return {
+          ...state,
+          deck: newDeck,
+          pile: [],
+          deadPile: newDeadPile,
+          hands: { ...state.hands, bot: newBotHandAfterDraw },
+          turn: 'human',
+          leadCard: null,
+          lastPlay: newLastPlay,
+          log: finalLog,
+          winner: newWinner,
+          trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
+        };
+      }
+    } else {
+      // Bot is leading
+      let finalLog = newLog;
+      
+      // Add trump card message if it was just drawn
+      if (trumpCardWasDrawn && !state.trumpCardDrawn) {
+        finalLog = [...newLog, `Bot drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+      }
+      
+      return {
+        ...state,
+        deck: newDeck,
+        pile: newPile,
+        hands: { ...state.hands, bot: newBotHandAfterDraw },
+        turn: 'human',
+        leadCard: choice,
+        lastPlay: newLastPlay,
+        log: finalLog,
+        winner: newWinner,
+        trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
       };
     }
   }

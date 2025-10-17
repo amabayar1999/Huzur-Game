@@ -1,7 +1,8 @@
 // Card helpers and core rules for Huzur
 
-export const SUITS = ['H', 'S', 'D', 'C'];
-export const RANKS = ['7', '8', '9', '10', 'J', 'Q', 'K', '3', '2', 'A']; // Removed 4, 5, 6 for traditional Huzur
+import { SUITS, RANKS, COMBO_SIZES } from './constants';
+
+export { SUITS, RANKS };
 
 export function createDeck() {
   const deck = [];
@@ -136,25 +137,98 @@ export function getCardsInSuit(hand, suit) {
   return hand.filter(card => card.suit === suit && !isJoker(card));
 }
 
-// Combo detection functions - Traditional Huzur pairs+1 pattern
+// Combo detection functions - Relaxed Huzur pairs+1 pattern
+// Jokers can act as wildcards to complete pairs
+// Allows triplets and pairs that share ranks with the random card
 export function isCombo(cards) {
-  if (!cards || (cards.length !== 3 && cards.length !== 5)) return false;
+  if (!cards || (cards.length !== COMBO_SIZES.SMALL && cards.length !== COMBO_SIZES.LARGE)) return false;
   
+  // Count regular cards by rank and count jokers separately
   const rankCounts = {};
+  let jokerCount = 0;
+  
   cards.forEach(card => {
-    if (!isJoker(card)) {
+    if (isJoker(card)) {
+      jokerCount++;
+    } else {
       rankCounts[card.rank] = (rankCounts[card.rank] || 0) + 1;
     }
   });
   
+  // Get all rank counts as an array
   const rankCountsArray = Object.values(rankCounts);
   
-  if (cards.length === 3) {
-    // 3 cards: exactly one rank appears twice (pair + 1 other)
-    return rankCountsArray.length === 2 && rankCountsArray.includes(2) && rankCountsArray.includes(1);
-  } else if (cards.length === 5) {
-    // 5 cards: exactly two ranks appear twice (2 pairs + 1 other)
-    return rankCountsArray.length === 3 && rankCountsArray.filter(count => count === 2).length === 2 && rankCountsArray.includes(1);
+  if (cards.length === COMBO_SIZES.SMALL) {
+    // 3 cards: need at least 2 cards of the same rank (allowing triplets)
+    // Valid patterns: 2+1, 3 (triplets), or with jokers
+    
+    // Count how many ranks have 2+ cards
+    const pairCount = rankCountsArray.filter(count => count >= 2).length;
+    
+    // If we have any rank with 2+ cards, it's valid
+    if (pairCount >= 1) {
+      return true;
+    }
+    
+    // If no natural pairs, try to form one with jokers
+    if (jokerCount >= 2) {
+      // 2+ jokers can form a pair
+      return true;
+    }
+    
+    if (jokerCount === 1 && rankCountsArray.length >= 1) {
+      // 1 joker + any single card can form a pair
+      return true;
+    }
+    
+    return false;
+    
+  } else if (cards.length === COMBO_SIZES.LARGE) {
+    // 5 cards: need at least 4 cards that can form 2 pairs
+    // Valid patterns: 2+2+1, 3+2 (triplet+pair), 4+1 (quad+single), etc.
+    
+    // Count total paired cards (excluding singles and one extra)
+    // We need at least 4 cards that can form pairs
+    let pairedCards = 0;
+    
+    // Count cards that are in pairs/triplets/quads
+    rankCountsArray.forEach(count => {
+      if (count >= 2) {
+        // These cards can form at least one pair
+        pairedCards += Math.floor(count / 2) * 2; // Count pairs (2, 4, 6...)
+      }
+    });
+    
+    // Add jokers to paired cards (2 jokers = 1 pair worth)
+    pairedCards += Math.floor((jokerCount + rankCountsArray.filter(c => c === 1).length) / 2) * 2;
+    
+    // We need at least 4 cards that can form pairs (2 pairs worth)
+    if (pairedCards >= 4) {
+      return true;
+    }
+    
+    // Special case: if we have jokers, they can complete pairs more flexibly
+    // Count ranks with at least 2 cards
+    const pairRanks = rankCountsArray.filter(count => count >= 2).length;
+    
+    // If we have at least 1 natural pair/triplet/quad
+    if (pairRanks >= 1) {
+      // Count how many more pairs we can form with jokers and singles
+      const singles = rankCountsArray.filter(count => count === 1).length;
+      const availableForPairs = jokerCount + singles;
+      
+      // We need at least 1 more pair (2 cards)
+      if (availableForPairs >= 2) {
+        return true;
+      }
+    }
+    
+    // If we have 2+ pairs naturally, it's valid
+    if (pairRanks >= 2) {
+      return true;
+    }
+    
+    return false;
   }
   
   return false;
@@ -181,22 +255,25 @@ export function canBeatCombo(leadCombo, responseCombo, trumpSuit) {
   return true;
 }
 
-// Function to check if any cards can beat a lead combo by array position
-export function canBeatComboWithOrder(leadCombo, responseCards, trumpSuit) {
-  // Lead must be a valid combo, but response can be any cards
-  if (!isCombo(leadCombo)) return false;
-  
-  // Both must be the same size
+/**
+ * Position-based combo matching (using selection order)
+ * When responding to a combo, cards are matched by their position in the array.
+ * First selected card beats first lead card, second beats second, etc.
+ * This allows players to strategically order their cards to beat a combo.
+ * 
+ * @param {Array} leadCombo - The lead combo to beat
+ * @param {Array} responseCards - The cards attempting to beat the lead
+ * @param {string} trumpSuit - Current trump suit
+ * @returns {boolean} - True if response beats lead position-by-position
+ */
+export function canBeatComboByPosition(leadCombo, responseCards, trumpSuit) {
+  if (!Array.isArray(leadCombo) || !Array.isArray(responseCards)) return false;
   if (leadCombo.length !== responseCards.length) return false;
   
-  // Keep both combos in their original order (no sorting)
-  const leadCards = [...leadCombo];
-  const orderedResponse = [...responseCards];
-  
-  // For any cards to beat a combo, each card in the response must beat
-  // the corresponding card in the lead at the same array position
-  for (let i = 0; i < leadCards.length; i++) {
-    if (!canBeat(leadCards[i], orderedResponse[i], trumpSuit)) {
+  // Match cards by their positions (no sorting!)
+  // First selected card beats first lead card, second beats second, etc.
+  for (let i = 0; i < leadCombo.length; i++) {
+    if (!canBeat(leadCombo[i], responseCards[i], trumpSuit)) {
       return false;
     }
   }
@@ -229,12 +306,12 @@ function getComboStructure(combo, trumpSuit) {
     }
   });
   
-  if (combo.length === 3) {
+  if (combo.length === COMBO_SIZES.SMALL) {
     return {
       pair: pairs[0], // Single pair
       single: singles[0] // Single card
     };
-  } else if (combo.length === 5) {
+  } else if (combo.length === COMBO_SIZES.LARGE) {
     return {
       pairs: pairs, // Two pairs
       single: singles[0] // Single card
@@ -328,33 +405,22 @@ export function getComboPlayOrderBySelection(combo, trumpSuit) {
 export function canPlayCombo(leadCombo, responseCards, hand, trumpSuit) {
   if (!leadCombo) return true; // Leading with combo is always allowed
   
-  // If responding to a combo, can play any cards that beat it
+  // If responding to a combo, use position-based comparison
   if (isCombo(leadCombo)) {
-    // Response can be any cards, not necessarily a valid combo
     if (!responseCards || responseCards.length === 0) {
-      console.log('No response cards provided');
       return false;
     }
     
-    // Add debug logging
-    console.log('Lead combo:', leadCombo.map(c => formatCard(c)));
-    console.log('Response cards:', responseCards.map(c => formatCard(c)));
-    console.log('Lead combo size:', leadCombo.length);
-    console.log('Response cards size:', responseCards.length);
-    
-    const canBeat = canBeatComboWithOrder(leadCombo, responseCards, trumpSuit);
-    console.log('Can beat combo:', canBeat);
-    
-    if (!canBeat) {
-      const debug = canBeatComboDebug(leadCombo, responseCards, trumpSuit);
-      console.log('Debug info:', debug);
+    if (leadCombo.length !== responseCards.length) {
+      return false;
     }
     
-    return canBeat;
+    // Use selection order - first card beats first card, etc.
+    return canBeatComboByPosition(leadCombo, responseCards, trumpSuit);
   }
   
   // If responding to a single card with a combo, combo must beat the single card
-  if (responseCards && (responseCards.length === 3 || responseCards.length === 5)) {
+  if (responseCards && (responseCards.length === COMBO_SIZES.SMALL || responseCards.length === COMBO_SIZES.LARGE)) {
     return responseCards.every(card => canBeat(leadCombo, card, trumpSuit));
   }
   
