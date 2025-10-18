@@ -7,7 +7,7 @@ import { COMBO_SIZES, DELAYS } from '../../lib/huzur/constants';
 import ErrorBoundary from '../../components/ErrorBoundary';
 
 function CardGameInner() {
-  const [state, dispatch] = useReducer(gameReducer, null, () => null);
+  const [state, dispatch] = useReducer(gameReducer, null, initGame);
   const [selectedIdx, setSelectedIdx] = useState(null);
   const [selectedCombo, setSelectedCombo] = useState([]);
   const [isClient, setIsClient] = useState(false);
@@ -15,8 +15,11 @@ function CardGameInner() {
   // Initialize game only on client side to avoid hydration mismatch
   useEffect(() => {
     setIsClient(true);
-    dispatch({ type: 'RESET' });
-  }, []);
+    // Only dispatch RESET if state is null (initial load)
+    if (!state) {
+      dispatch({ type: 'RESET' });
+    }
+  }, [state]);
 
   const playerHand = useMemo(() => {
     if (!state || !state.hands) return [];
@@ -183,9 +186,11 @@ function CardGameInner() {
   };
 
   const onReset = () => {
-    dispatch({ type: 'RESET' });
+    // Clear selections first
     setSelectedIdx(null);
     setSelectedCombo([]);
+    // Then reset the game state
+    dispatch({ type: 'RESET' });
   };
 
   const onExchangeTrump = () => {
@@ -214,130 +219,180 @@ function CardGameInner() {
   const isRespondingToCombo = state.leadCard && isCombo(state.leadCard);
 
   return (
-    <div className="font-sans min-h-screen p-6 sm:p-10">
-      <main className="flex flex-col gap-6 items-center w-full max-w-3xl mx-auto">
-        <div className="w-full flex items-center justify-between">
-          <h1 className="text-2xl font-bold">Huzur (MVP)</h1>
-          <div className="flex items-center gap-4">
-            <span className="text-sm">Trump: <span className="text-lg">{trumpIcon}</span></span>
-            {state.trumpCard && (
-              <span className="text-xs text-gray-600">
-                Under deck: {formatCard(state.trumpCard)}
+    <div className="font-sans min-h-screen bg-gradient-to-br from-green-50 via-blue-50 to-purple-50 p-6 sm:p-10">
+      <main className="flex flex-col gap-6 items-center w-full max-w-4xl mx-auto">
+        <div className="w-full bg-white/80 backdrop-blur-sm rounded-xl shadow-lg border border-white/20 p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+                🃏 Huzur
+              </h1>
+              <span className={`px-3 py-1 text-sm font-semibold rounded-full shadow-sm ${
+                state.turn === 'human' 
+                  ? 'bg-green-100 text-green-800 border border-green-200' 
+                  : 'bg-blue-100 text-blue-800 border border-blue-200'
+              }`}>
+                {state.turn === 'human' ? '🎯 Your Turn' : '🤖 Bot Turn'}
               </span>
-            )}
-            {!state.trumpCardDrawn && (
-              <span className="text-xs px-2 py-1 bg-orange-100 border border-orange-300 rounded">
-                🔒 5-card combos locked
-              </span>
-            )}
-            {state.trumpCardDrawn && (
-              <span className="text-xs px-2 py-1 bg-green-100 border border-green-300 rounded">
-                🔓 5-card combos unlocked
-              </span>
-            )}
-            <button className="px-3 py-1 border rounded" onClick={onReset}>Reset</button>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 px-3 py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <span className="text-sm font-medium text-yellow-800">Trump:</span>
+                <span className="text-xl">{trumpIcon}</span>
+              </div>
+              {state.trumpCard && (
+                <div className="px-2 py-1 bg-gray-100 border border-gray-200 rounded text-xs text-gray-700">
+                  Under deck: {formatCard(state.trumpCard)}
+                </div>
+              )}
+              {!state.trumpCardDrawn && (
+                <span className="text-xs px-3 py-1 bg-orange-100 border border-orange-300 rounded-full font-medium">
+                  🔒 5-card combos locked
+                </span>
+              )}
+              {state.trumpCardDrawn && (
+                <span className="text-xs px-3 py-1 bg-green-100 border border-green-300 rounded-full font-medium">
+                  🔓 5-card combos unlocked
+                </span>
+              )}
+              <button 
+                className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed" 
+                onClick={onReset}
+                disabled={!isClient}
+              >
+                🔄 Reset
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Deck indicator */}
-        <section className="w-full flex flex-col items-center gap-2">
-          <div className="text-sm font-medium">Deck</div>
-          <div className="flex items-center gap-3">
-            <div className="relative">
-              {/* Stack of cards visual */}
-              <div className="w-12 h-16 bg-blue-600 rounded border-2 border-blue-800 shadow-lg flex items-center justify-center">
-                <span className="text-white text-xs font-bold">{state.deck.length}</span>
-              </div>
-              {/* Additional cards in stack for visual effect */}
-              {state.deck.length > 1 && (
-                <div className="absolute top-1 left-1 w-12 h-16 bg-blue-500 rounded border border-blue-700 opacity-75"></div>
-              )}
-              {state.deck.length > 2 && (
-                <div className="absolute top-2 left-2 w-12 h-16 bg-blue-400 rounded border border-blue-600 opacity-50"></div>
-              )}
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="text-sm text-gray-600">
-                {state.deck.length} card{state.deck.length !== 1 ? 's' : ''} remaining
-              </div>
-              {/* Progress bar showing deck depletion */}
-              <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-blue-500 transition-all duration-300"
-                  style={{ width: `${(state.deck.length / 32) * 100}%` }}
-                ></div>
-              </div>
-            </div>
-          </div>
-          {state.deck.length === 0 && (
-            <div className="text-xs text-red-600 font-medium">
-              Deck is empty - no more cards to draw!
-            </div>
-          )}
-          {state.deck.length === 1 && !state.trumpCardDrawn && (
-            <div className="text-xs text-yellow-600 font-medium">
-              ⚠️ Next card is the trump card: {formatCard(state.trumpCard)}
-            </div>
-          )}
-        </section>
-
-        <section className="w-full flex flex-col items-center gap-2">
-          <div className="text-sm">Bot hand: {state.hands.bot.length} cards</div>
-          <div className="flex gap-1 opacity-60">
-            {Array.from({ length: state.hands.bot.length }).map((_, i) => (
-              <div key={i} className="w-6 h-8 bg-gray-300 rounded border" />
-            ))}
+        {/* Turn indicator */}
+        <section className="w-full flex justify-center">
+          <div className={`px-8 py-4 rounded-2xl border-2 font-bold text-xl transition-all duration-500 transform hover:scale-105 ${
+            state.turn === 'human' 
+              ? 'bg-gradient-to-r from-green-100 to-emerald-100 border-green-400 text-green-800 shadow-xl shadow-green-200 animate-pulse' 
+              : 'bg-gradient-to-r from-blue-100 to-cyan-100 border-blue-400 text-blue-800 shadow-xl shadow-blue-200'
+          }`}>
+            {state.turn === 'human' ? '🎯 Your Turn - Make Your Move!' : '🤖 Bot\'s Turn - Thinking...'}
           </div>
         </section>
 
-        <section className="w-full flex flex-col items-center gap-3">
-          <div className="text-sm">Center</div>
-          <div className="min-h-16 w-full flex items-center justify-center gap-4 border rounded p-3">
-            {state.leadCard ? (
-              <div className="px-3 py-2 border rounded bg-white">
-                Lead: {Array.isArray(state.leadCard) ? (
-                  <span className="flex gap-1">
-                    {state.leadCard.map((card, idx) => (
-                      <span key={idx}>{formatCard(card)}</span>
-                    ))}
-                  </span>
-                ) : formatCard(state.leadCard)}
-                {state.lastPlay.bot && (
-                  <span className="ml-2 text-xs text-blue-600">(Bot led)</span>
-                )}
-                {state.lastPlay.human && (
-                  <span className="ml-2 text-xs text-green-600">(You led)</span>
-                )}
-              </div>
-            ) : (
-              <div className="text-gray-500 text-sm">No active trick</div>
-            )}
-          </div>
-          <div className="w-full text-xs max-h-32 overflow-auto border rounded p-2 bg-gray-50">
-            {state.log.map((line, i) => (
-              <div key={i}>{line}</div>
-            ))}
-          </div>
-        </section>
 
-        {state.deadPile && state.deadPile.length > 0 && (
-          <section className="w-full flex flex-col items-center gap-2">
-            <div className="text-sm">Dead Pile ({state.deadPile.length} cards)</div>
-            <div className="flex flex-wrap gap-1 justify-center max-h-20 overflow-auto">
-              {state.deadPile.map((card, idx) => (
-                <div
-                  key={`dead-${card.rank}-${card.suit}-${idx}`}
-                  className="px-2 py-1 text-xs border rounded bg-gray-100 opacity-75"
-                >
-                  {formatCard(card)}
-                </div>
+        <section className="w-full bg-white/60 backdrop-blur-sm rounded-xl shadow-lg border border-white/20 p-4">
+          <div className="flex flex-col items-center gap-3">
+            <div className="text-lg font-bold text-gray-800">🤖 Bot Hand: {state.hands.bot.length} cards</div>
+            <div className="flex gap-2 justify-center flex-wrap">
+              {Array.from({ length: state.hands.bot.length }).map((_, i) => (
+                <div key={i} className="w-8 h-12 bg-gradient-to-br from-gray-300 to-gray-400 rounded-lg border-2 border-gray-500 shadow-md transform hover:scale-105 transition-transform" />
               ))}
             </div>
-          </section>
-        )}
+          </div>
+        </section>
 
-        <section className="w-full flex flex-col items-center gap-2">
-          <div className="text-sm">Your hand ({playerHand.length})</div>
+        {/* Play Area - Between Bot and Player Hands */}
+        <section className="w-full bg-white/60 backdrop-blur-sm rounded-xl shadow-lg border border-white/20 p-6">
+          <div className="flex flex-col items-center gap-6">
+            <div className="text-xl font-bold text-gray-800">🎯 Play Area</div>
+            <div className="w-full flex items-center justify-between gap-6 bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl border-2 border-dashed border-blue-200 p-8 min-h-32">
+              {/* Dead Pile - Left Side */}
+              <div className="flex flex-col items-center gap-2">
+                <div className="text-sm font-semibold text-gray-700">💀 Dead Pile</div>
+                {state.deadPile && state.deadPile.length > 0 ? (
+                  <div className="flex flex-col items-center gap-1">
+                    <div className="w-12 h-16 bg-gradient-to-br from-gray-400 to-gray-600 rounded-lg border-2 border-gray-700 shadow-lg flex items-center justify-center">
+                      <span className="text-white text-sm font-bold">{state.deadPile.length}</span>
+                    </div>
+                    <div className="text-xs text-gray-600 text-center">
+                      {state.deadPile.length} card{state.deadPile.length !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="w-12 h-16 bg-gray-200 rounded-lg border-2 border-dashed border-gray-400 flex items-center justify-center">
+                    <span className="text-gray-400 text-xs">0</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Center - Lead Card */}
+              <div className="flex-1 flex items-center justify-center">
+                {state.leadCard ? (
+                  <div className="px-6 py-4 bg-white rounded-xl shadow-lg border-2 border-blue-300">
+                    <div className="text-sm font-semibold text-gray-600 mb-2 text-center">Lead Card:</div>
+                    <div className="flex items-center gap-2 justify-center">
+                      {Array.isArray(state.leadCard) ? (
+                        <div className="flex gap-1">
+                          {state.leadCard.map((card, idx) => (
+                            <span key={idx} className="px-2 py-1 bg-blue-100 border border-blue-300 rounded text-sm font-medium">
+                              {formatCard(card)}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="px-4 py-2 bg-blue-100 border border-blue-300 rounded-lg text-lg font-bold">
+                          {formatCard(state.leadCard)}
+                        </span>
+                      )}
+                      {state.lastPlay.bot && (
+                        <span className="ml-2 text-xs text-blue-600 font-medium bg-blue-100 px-2 py-1 rounded">(Bot led)</span>
+                      )}
+                      {state.lastPlay.human && (
+                        <span className="ml-2 text-xs text-green-600 font-medium bg-green-100 px-2 py-1 rounded">(You led)</span>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-gray-500 text-lg font-medium">No active trick - waiting for lead</div>
+                )}
+              </div>
+
+              {/* Deck - Right Side */}
+              <div className="flex flex-col items-center gap-2">
+                <div className="text-sm font-semibold text-gray-700">🃏 Deck</div>
+                <div className="flex flex-col items-center gap-1">
+                  <div className="relative">
+                    {/* Stack of cards visual */}
+                    <div className="w-12 h-16 bg-gradient-to-br from-blue-600 to-blue-800 rounded-lg border-2 border-blue-900 shadow-lg flex items-center justify-center">
+                      <span className="text-white text-sm font-bold">{state.deck.length}</span>
+                    </div>
+                    {/* Additional cards in stack for visual effect */}
+                    {state.deck.length > 1 && (
+                      <div className="absolute top-1 left-1 w-12 h-16 bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg border border-blue-800 opacity-75"></div>
+                    )}
+                    {state.deck.length > 2 && (
+                      <div className="absolute top-2 left-2 w-12 h-16 bg-gradient-to-br from-blue-400 to-blue-600 rounded-lg border border-blue-700 opacity-50"></div>
+                    )}
+                  </div>
+                  <div className="text-xs text-gray-600 text-center">
+                    {state.deck.length} card{state.deck.length !== 1 ? 's' : ''}
+                  </div>
+                  {/* Progress bar showing deck depletion */}
+                  <div className="w-16 h-2 bg-gray-200 rounded-full overflow-hidden shadow-inner">
+                    <div 
+                      className="h-full bg-gradient-to-r from-blue-500 to-blue-600 transition-all duration-500 rounded-full"
+                      style={{ width: `${(state.deck.length / 32) * 100}%` }}
+                    ></div>
+                  </div>
+                </div>
+                {state.deck.length === 0 && (
+                  <div className="text-xs text-red-600 font-bold bg-red-50 px-2 py-1 rounded border border-red-200 text-center">
+                    ⚠️ Empty!
+                  </div>
+                )}
+                {state.deck.length === 1 && !state.trumpCardDrawn && (
+                  <div className="text-xs text-yellow-600 font-bold bg-yellow-50 px-2 py-1 rounded border border-yellow-200 text-center">
+                    ⚠️ Trump next!
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+
+
+
+        <section className="w-full bg-white/60 backdrop-blur-sm rounded-xl shadow-lg border border-white/20 p-4">
+          <div className="flex flex-col items-center gap-4">
+            <div className="text-lg font-bold text-gray-800">🃏 Your Hand ({playerHand.length} cards)</div>
           {selectedCombo.length > 0 && (
             <div className="text-xs text-blue-600">
               {isRespondingToCombo ? (
@@ -366,7 +421,7 @@ function CardGameInner() {
               ⚠️ Responding to single card - only single cards allowed (no combos)
             </div>
           )}
-          <div className="flex flex-wrap gap-2 justify-center">
+          <div className="flex flex-wrap gap-3 justify-center">
             {playerHand.map((c, idx) => {
               const isSelected = selectedIdx === idx;
               const isInCombo = selectedCombo.some(card => card === c);
@@ -380,61 +435,86 @@ function CardGameInner() {
                   onKeyDown={(e) => handleCardKeyDown(e, idx)}
                   aria-label={`${cardDescription}${isTrumpCard ? ', Trump card' : ''}${isSelected ? ', Selected' : ''}${isInCombo ? ', In combo' : ''}`}
                   aria-pressed={isSelected || isInCombo}
-                  className={`px-3 py-2 rounded border ${
-                    isSelected ? 'ring-2 ring-blue-500' : 
-                    isInCombo ? 'ring-2 ring-green-500 bg-green-50' : ''
-                  } ${isTrumpCard ? 'bg-yellow-50' : 'bg-white'} hover:shadow-md transition-shadow focus:outline-none focus:ring-2 focus:ring-blue-400`}
+                  className={`px-4 py-3 rounded-xl border-2 font-bold text-lg transition-all duration-200 transform hover:scale-105 hover:-translate-y-1 ${
+                    isSelected ? 'ring-4 ring-blue-400 bg-blue-100 border-blue-500 shadow-xl' : 
+                    isInCombo ? 'ring-4 ring-green-400 bg-green-100 border-green-500 shadow-xl' : 
+                    'bg-white border-gray-300 shadow-md hover:shadow-lg'
+                  } ${isTrumpCard ? 'bg-gradient-to-br from-yellow-100 to-yellow-200 border-yellow-400' : ''} focus:outline-none focus:ring-4 focus:ring-blue-400`}
                 >
                   {formatCard(c)}
                 </button>
               );
             })}
           </div>
-          <div className="flex items-center gap-3" role="group" aria-label="Game actions">
+          <div className="flex items-center gap-4 flex-wrap justify-center" role="group" aria-label="Game actions">
             {isRespondingToCombo ? (
               // Special button for beating combos
               <button 
-                className="px-4 py-2 border rounded bg-purple-50 border-purple-300 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-purple-100 transition" 
+                className="px-6 py-3 bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 transition-all duration-200" 
                 onClick={onBeatCombo} 
                 disabled={!canBeatComboNow()}
                 aria-label={`Beat combo with ${selectedCombo.length} cards`}
               >
-                Beat Combo ({selectedCombo.length}/{state.leadCard.length})
+                ⚔️ Beat Combo ({selectedCombo.length}/{state.leadCard.length})
               </button>
             ) : (
               // Regular play button
               <button 
-                className="px-4 py-2 border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-100 transition" 
+                className="px-6 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 transition-all duration-200" 
                 onClick={onPlay} 
                 disabled={!isValidPlay()}
                 aria-label={(selectedCombo.length === COMBO_SIZES.SMALL || selectedCombo.length === COMBO_SIZES.LARGE) ? 'Play selected combo' : 'Play selected card'}
               >
-                {(selectedCombo.length === COMBO_SIZES.SMALL || selectedCombo.length === COMBO_SIZES.LARGE) ? 'Play Combo' : 'Play'}
+                {(selectedCombo.length === COMBO_SIZES.SMALL || selectedCombo.length === COMBO_SIZES.LARGE) ? '🎯 Play Combo' : '🎯 Play'}
               </button>
             )}
             <button 
-              className={`px-4 py-2 border rounded disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-100 transition ${mustPickup ? 'bg-red-100 border-red-300' : ''}`}
+              className={`px-6 py-3 rounded-xl font-bold shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105 transition-all duration-200 ${
+                mustPickup 
+                  ? 'bg-gradient-to-r from-red-500 to-red-600 text-white' 
+                  : 'bg-gradient-to-r from-orange-500 to-orange-600 text-white'
+              }`}
               onClick={onPickup}
               disabled={!canPickup && !mustPickup}
               aria-label={mustPickup ? 'Pick up pile (required)' : 'Pick up pile'}
             >
-              {mustPickup ? 'Must Pick Up' : 'Pick Up'}
+              {mustPickup ? '⚠️ Must Pick Up' : '📥 Pick Up'}
             </button>
             {canExchangeTrump && (
               <button 
-                className="px-4 py-2 border rounded bg-yellow-50 border-yellow-300 hover:bg-yellow-100 transition" 
+                className="px-6 py-3 bg-gradient-to-r from-yellow-500 to-yellow-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl hover:scale-105 transition-all duration-200" 
                 onClick={onExchangeTrump}
                 aria-label={`Exchange 7 of ${getSuitName(state.trumpSuit)} for trump card`}
               >
-                Exchange 7{trumpIcon}
+                🔄 Exchange 7{trumpIcon}
               </button>
             )}
+          </div>
+          </div>
+        </section>
+
+        {/* Game Log - Bottom of Page */}
+        <section className="w-full bg-white/60 backdrop-blur-sm rounded-xl shadow-lg border border-white/20 p-4">
+          <div className="flex flex-col gap-3">
+            <div className="text-lg font-bold text-gray-800">📜 Game Log</div>
+            <div className="bg-gray-50 rounded-xl border border-gray-200 p-3 h-64 overflow-auto">
+              <div className="text-xs space-y-1">
+                {state.log.map((line, i) => (
+                  <div key={i} className="text-gray-600">{line}</div>
+                ))}
+              </div>
+            </div>
           </div>
         </section>
 
         {state.winner && (
-          <div className="w-full p-3 border rounded bg-green-50 text-center">
-            {state.winner === 'human' ? 'You win!' : 'Bot wins!'}
+          <div className="w-full p-6 border-2 border-yellow-400 rounded-2xl bg-gradient-to-r from-yellow-100 to-orange-100 text-center shadow-xl">
+            <div className="text-3xl font-bold text-gray-800 mb-2">
+              {state.winner === 'human' ? '🎉 Congratulations! You Win! 🎉' : '🤖 Bot Wins! 🤖'}
+            </div>
+            <div className="text-lg text-gray-600">
+              {state.winner === 'human' ? 'Great job! You played an excellent game!' : 'Better luck next time! The bot played well.'}
+            </div>
           </div>
         )}
       </main>
@@ -449,3 +529,4 @@ export default function CardGame() {
     </ErrorBoundary>
   );
 }
+

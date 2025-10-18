@@ -1,5 +1,89 @@
 import { canBeat, compareCards, isTrump, mustFollowSuit, getCardsInSuit, isJoker, isCombo, canBeatCombo, canBeatComboByPosition, canPlayCombo, getComboPlayOrder } from './cards';
-import { COMBO_SIZES, CARD_POWER } from './constants';
+import { COMBO_SIZES, CARD_POWER, RANKS } from './constants';
+
+// Strategic game phase detection
+function getGamePhase(deckLength, trumpCardDrawn) {
+  const totalCards = 54; // 52 cards + 2 jokers
+  const cardsPlayed = totalCards - deckLength;
+  
+  if (cardsPlayed < 20) return 'early';
+  if (cardsPlayed < 40) return 'mid';
+  return 'late';
+}
+
+// Determine if bot should conserve trump cards
+function shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn) {
+  // Be more conservative with trumps in early game, but not overly so
+  if (gamePhase === 'early') return true;
+  
+  // If deck is running low, be more aggressive
+  if (deckLength < 10) return false;
+  
+  // If trump card not drawn yet, be moderately conservative
+  if (!trumpCardDrawn) return true;
+  
+  // In mid game, be balanced (not too conservative)
+  return gamePhase === 'mid';
+}
+
+// Count trump cards in hand
+function countTrumpsInHand(hand, trumpSuit) {
+  return hand.filter(card => isTrump(card, trumpSuit)).length;
+}
+
+// Adjust strategy based on trump count
+function adjustStrategyForTrumpCount(trumpCount, gamePhase) {
+  if (trumpCount >= 3 && gamePhase === 'early') {
+    return 'very_conservative'; // Save most trumps
+  }
+  if (trumpCount <= 1 && gamePhase === 'late') {
+    return 'aggressive'; // Use remaining trumps
+  }
+  return 'balanced';
+}
+
+// Enhanced card power calculation with strategic considerations
+function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount) {
+  const basePower = isJoker(card) ? CARD_POWER.JOKER : 
+    RANKS.indexOf(card.rank) * CARD_POWER.BASE_RANK_MULTIPLIER;
+  
+  // Add strategic modifiers
+  let strategicValue = basePower;
+  
+  if (isTrump(card, trumpSuit)) {
+    // Trump cards are more valuable - but allow lower-value trumps
+    if (shouldConserve) {
+      // Only add penalty for high-value trump cards
+      if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
+        strategicValue += 50; // High-value trumps get penalty
+      } else if (card.rank === 'K' || card.rank === 'Q' || card.rank === 'J') {
+        strategicValue += 20; // Medium-value trumps get smaller penalty
+      }
+      // Low-value trumps (7, 8, 9, 10) get no penalty - can be used freely
+    }
+    
+    // Adjust based on trump count in hand
+    const strategy = adjustStrategyForTrumpCount(trumpCount, gamePhase);
+    if (strategy === 'very_conservative') {
+      // Even in very conservative mode, allow low-value trumps
+      if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
+        strategicValue += 40;
+      } else if (card.rank === 'K' || card.rank === 'Q' || card.rank === 'J') {
+        strategicValue += 15;
+      }
+      // Low-value trumps still get no penalty
+    } else if (strategy === 'aggressive') {
+      strategicValue -= 20;
+    }
+  }
+  
+  // Jokers are always very valuable
+  if (isJoker(card)) {
+    strategicValue += shouldConserve ? 100 : 50;
+  }
+  
+  return strategicValue;
+}
 
 // Helper function to find the best ordering of cards that beats the lead combo
 function findBestOrderingToBeatCombo(leadCombo, cards, trumpSuit) {
@@ -203,19 +287,46 @@ function findCombos(hand, trumpCardDrawn = true, isRespondingTo5CardCombo = fals
   return combos;
 }
 
-export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = true) {
+export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = true, opponentHandSize = null, deckLength = 54) {
+  // Calculate strategic parameters
+  const gamePhase = getGamePhase(deckLength, trumpCardDrawn);
+  const shouldConserve = shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn);
+  const trumpCount = countTrumpsInHand(hand, trumpSuit);
+  
+  // When responding to a card, be less conservative to avoid picking up
+  const isResponding = leadCard !== null;
+  const shouldConserveWhenResponding = isResponding ? false : shouldConserve;
+  
   if (!leadCard) {
-    // Bot is leading - try to play a combo first, otherwise play lowest card
+    // Bot is leading - use strategic card selection
     const combos = findCombos(hand, trumpCardDrawn, false);
-    if (combos.length > 0) {
-      // Play the combo with the lowest total power
-      return combos.sort((a, b) => {
-        const aPower = a.reduce((sum, card) => sum + (isJoker(card) ? CARD_POWER.JOKER : compareCards(card, {rank: '7', suit: 'H'}, trumpSuit)), 0);
-        const bPower = b.reduce((sum, card) => sum + (isJoker(card) ? CARD_POWER.JOKER : compareCards(card, {rank: '7', suit: 'H'}, trumpSuit)), 0);
-        return aPower - bPower;
+    
+    // Filter out combos that the opponent can't respond to
+    const playableCombos = combos.filter(combo => {
+      // If we don't know opponent's hand size, allow all combos (backward compatibility)
+      if (opponentHandSize === null) return true;
+      
+      // Don't play a combo if opponent has fewer cards than the combo size
+      return opponentHandSize >= combo.length;
+    });
+    
+    if (playableCombos.length > 0) {
+      // Play the combo with the lowest strategic value
+      return playableCombos.sort((a, b) => {
+        const aValue = a.reduce((sum, card) => 
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+        const bValue = b.reduce((sum, card) => 
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+        return aValue - bValue;
       })[0];
     }
-    return hand.sort((a, b) => compareCards(a, b, trumpSuit))[0];
+    
+    // For single cards, use strategic sorting
+    return hand.sort((a, b) => {
+      const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserve, trumpCount);
+      const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserve, trumpCount);
+      return aValue - bValue;
+    })[0];
   }
   
   // Check if lead is a combo
@@ -223,10 +334,20 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
     // Must respond with cards that beat the lead combo
     const isRespondingTo5CardCombo = leadCard.length === COMBO_SIZES.LARGE;
     const combos = findCombos(hand, trumpCardDrawn, isRespondingTo5CardCombo);
+    
+    // Filter out combos that the opponent can't respond to
+    const playableCombos = combos.filter(combo => {
+      // If we don't know opponent's hand size, allow all combos (backward compatibility)
+      if (opponentHandSize === null) return true;
+      
+      // Don't play a combo if opponent has fewer cards than the combo size
+      return opponentHandSize >= combo.length;
+    });
+    
     const beatingCombosWithOrder = [];
     
-    // For each combo, find the best ordering that beats the lead
-    for (const combo of combos) {
+    // For each playable combo, find the best ordering that beats the lead
+    for (const combo of playableCombos) {
       const orderedCombo = findBestOrderingToBeatCombo(leadCard, combo, trumpSuit);
       if (orderedCombo) {
         beatingCombosWithOrder.push(orderedCombo);
@@ -234,11 +355,13 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
     }
     
     if (beatingCombosWithOrder.length > 0) {
-      // Play the combo with the lowest total power that still beats
+      // Play the combo with the lowest strategic value that still beats
       return beatingCombosWithOrder.sort((a, b) => {
-        const aPower = a.reduce((sum, card) => sum + (isJoker(card) ? CARD_POWER.JOKER : compareCards(card, {rank: '7', suit: 'H'}, trumpSuit)), 0);
-        const bPower = b.reduce((sum, card) => sum + (isJoker(card) ? CARD_POWER.JOKER : compareCards(card, {rank: '7', suit: 'H'}, trumpSuit)), 0);
-        return aPower - bPower;
+        const aValue = a.reduce((sum, card) => 
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+        const bValue = b.reduce((sum, card) => 
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+        return aValue - bValue;
       })[0];
     }
     
@@ -254,8 +377,12 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
     const beatingInSuit = inSuit.filter(c => canBeat(leadCard, c, trumpSuit));
     
     if (beatingInSuit.length > 0) {
-      // Play lowest card that still beats
-      return beatingInSuit.sort((a, b) => compareCards(a, b, trumpSuit))[0];
+      // Play lowest strategic value card that still beats
+      return beatingInSuit.sort((a, b) => {
+        const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
+        const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
+        return aValue - bValue;
+      })[0];
     }
     
     // Can't beat with in-suit cards, must pick up
@@ -266,7 +393,12 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
   const trumps = hand.filter(c => isTrump(c, trumpSuit));
   const beatingTrumps = trumps.filter(c => canBeat(leadCard, c, trumpSuit));
   if (beatingTrumps.length > 0) {
-    return beatingTrumps.sort((a, b) => compareCards(a, b, trumpSuit))[0];
+    // Use strategic value for trump selection (less conservative when responding)
+    return beatingTrumps.sort((a, b) => {
+      const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
+      const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
+      return aValue - bValue;
+    })[0];
   }
   
   // Can't beat, must pick up

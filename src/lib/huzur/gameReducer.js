@@ -71,7 +71,7 @@ function playBotCard(state, choice) {
     newBotHand = removeCardsFromHand(state.hands.bot, indices);
     newPile = [...state.pile, ...choice];
     newLastPlay = { ...state.lastPlay, bot: choice };
-    newLog = [...state.log, `Bot played combo`];
+    newLog = [...state.log, `Bot played combo (${choice.length} cards) - Pile: ${state.pile.length} -> ${newPile.length} cards`];
   } else {
     // Bot played a single card
     const idx = state.hands.bot.findIndex(c => c === choice);
@@ -86,7 +86,7 @@ function playBotCard(state, choice) {
 
 // Helper: Handle bot leading after winning trick
 function handleBotLead(state, botHand, deadPile, log) {
-  const nextChoice = chooseBotResponse(null, botHand, state.trumpSuit, state.trumpCardDrawn);
+  const nextChoice = chooseBotResponse(null, botHand, state.trumpSuit, state.trumpCardDrawn, state.hands.human.length, state.deck.length);
   if (!nextChoice) {
     // Bot can't lead (shouldn't happen), pass turn to human
     return {
@@ -101,7 +101,7 @@ function handleBotLead(state, botHand, deadPile, log) {
   }
   
   const { newBotHand, newPile, newLastPlay, newLog } = playBotCard(
-    { ...state, hands: { ...state.hands, bot: botHand } }, 
+    { ...state, hands: { ...state.hands, bot: botHand }, pile: [] }, 
     nextChoice
   );
   
@@ -166,11 +166,14 @@ export function gameReducer(state, action) {
     if (action && action.type === 'RESET') return initGame();
     return state;
   }
-  if (state.winner) return state;
-  switch (action.type) {
-  case 'RESET': {
+  
+  // Always allow RESET, even if there's a winner
+  if (action.type === 'RESET') {
     return initGame();
   }
+  
+  if (state.winner) return state;
+  switch (action.type) {
   case 'HUMAN_PLAY': {
     const idx = action.index;
     const card = state.hands.human[idx];
@@ -286,6 +289,9 @@ export function gameReducer(state, action) {
     const newPile = [...state.pile, ...combo];
     const newLastPlay = { ...state.lastPlay, human: combo };
     
+    // Add logging for combo play
+    const comboLog = [...state.log, `You played combo (${combo.length} cards) - Pile: ${state.pile.length} -> ${newPile.length} cards`];
+    
     // Check for win condition BEFORE drawing
     const newWinner = checkWinCondition(newHumanHand) ? 'human' : state.winner;
     
@@ -298,7 +304,7 @@ export function gameReducer(state, action) {
       // Human is responding - resolve the trick
       const humanWon = determineTrickWinner(state.leadCard, combo, state.trumpSuit);
       const winner = humanWon ? 'human' : 'bot';
-      let newLog = [...state.log, `You played combo and ${humanWon ? 'won' : 'lost'} the trick`];
+      let newLog = [...comboLog, `You played combo and ${humanWon ? 'won' : 'lost'} the trick`];
       
       // Add trump card message if it was just drawn
       if (trumpCardWasDrawn && !state.trumpCardDrawn) {
@@ -323,7 +329,7 @@ export function gameReducer(state, action) {
       };
     } else {
       // Human is leading with combo
-      let newLog = [...state.log, `You led combo`];
+      let newLog = [...comboLog, `You led combo`];
       
       // Add trump card message if it was just drawn
       if (trumpCardWasDrawn && !state.trumpCardDrawn) {
@@ -352,9 +358,7 @@ export function gameReducer(state, action) {
     
     // Human picks up the pile (always allowed when there's a lead card)
     const newHumanHand = [...state.hands.human, ...state.pile];
-    const newLog = [...state.log, `You picked up the pile - your turn is skipped`];
-    
-    // No need to check win condition here - player is gaining cards, not losing them
+    const newLog = [...state.log, `You picked up ${state.pile.length} card(s) from the pile (Hand: ${state.hands.human.length} -> ${newHumanHand.length})`];
     
     return {
       ...state,
@@ -400,7 +404,7 @@ export function gameReducer(state, action) {
   }
   case 'BOT_ACT': {
     if (state.turn !== 'bot') return state;
-    const choice = chooseBotResponse(state.leadCard, state.hands.bot, state.trumpSuit, state.trumpCardDrawn);
+    const choice = chooseBotResponse(state.leadCard, state.hands.bot, state.trumpSuit, state.trumpCardDrawn, state.hands.human.length, state.deck.length);
     
     if (!choice) {
       // Bot picks up (only when responding, not when leading)
@@ -470,11 +474,27 @@ export function gameReducer(state, action) {
       }
     } else {
       // Bot is leading
-      let finalLog = newLog;
+      let finalLog = [...newLog, `Bot leading (Human hand: ${state.hands.human.length} cards, Bot hand: ${newBotHandAfterDraw.length} cards)`];
       
       // Add trump card message if it was just drawn
       if (trumpCardWasDrawn && !state.trumpCardDrawn) {
-        finalLog = [...newLog, `Bot drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+        finalLog = [...finalLog, `Bot drew ${formatCard(state.trumpCard)} - 5-card combos are now allowed!`];
+      }
+      
+      // If bot won by playing its last card, return the winning state immediately
+      if (newWinner === 'bot') {
+        return {
+          ...state,
+          deck: newDeck,
+          pile: newPile,
+          hands: { ...state.hands, bot: newBotHandAfterDraw },
+          turn: 'bot', // Keep turn as bot since bot won
+          leadCard: null, // Clear lead card since game is over
+          lastPlay: newLastPlay,
+          log: finalLog,
+          winner: newWinner,
+          trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
+        };
       }
       
       return {
