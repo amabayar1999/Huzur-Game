@@ -189,6 +189,11 @@ body {
   color: #1f2937;
 }
 
+.center-suit-minimal {
+  font-size: 0.8em !important;
+  opacity: 0.6;
+}
+
 .joker-symbol {
   display: flex;
   flex-direction: column;

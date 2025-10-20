@@ -231,6 +231,7 @@ function CardGameInner() {
   }
 
   const trumpIcon = suitToIcon(state.trumpSuit);
+  const trumpSuitColor = state.trumpSuit === 'H' || state.trumpSuit === 'D' ? 'text-red-600' : 'text-black';
   const isRespondingToCombo = state.leadCard && isCombo(state.leadCard);
 
   return (
@@ -275,26 +276,34 @@ function CardGameInner() {
         </section>
 
 
-        {/* Play Area - Focused on Lead Card */}
+        {/* Enhanced Play Area - Lead vs Response Cards */}
         <section className="w-full bg-gray-800/90 backdrop-blur-sm rounded-xl shadow-lg border border-gray-600/30 p-4 sm:p-6">
           <div className="flex flex-col items-center gap-4 sm:gap-6">
-            <div className="w-full flex items-center justify-center bg-gradient-to-r from-gray-700/50 to-gray-600/50 rounded-xl border-2 border-dashed border-gray-500/50 p-8 sm:p-12 lg:p-16 min-h-48 sm:min-h-64">
-              {/* Center - Lead Card */}
-              <div className="flex items-center justify-center">
-                {state.leadCard ? (
-                  <div className="px-6 sm:px-8 lg:px-12 py-4 sm:py-6 lg:py-8 bg-gray-800/80 rounded-xl shadow-xl border-2 border-blue-400">
-                    <div className="text-sm sm:text-base lg:text-lg font-bold text-gray-200 mb-2 sm:mb-4 text-center">🎯 Lead Card</div>
+            <div className="w-full flex items-center justify-center bg-gradient-to-r from-gray-700/50 to-gray-600/50 rounded-xl border-2 border-dashed border-gray-500/50 p-6 sm:p-8 lg:p-12 min-h-64 sm:min-h-80">
+              
+              {state.leadCard ? (
+                <div className="flex flex-col items-center gap-4 sm:gap-6 w-full">
+                  {/* Lead Card Section */}
+                  <div className="px-4 sm:px-6 lg:px-8 py-3 sm:py-4 lg:py-6 bg-gray-800/80 rounded-xl shadow-xl border-2 border-blue-400">
+                    <div className="text-sm sm:text-base lg:text-lg font-bold text-gray-200 mb-2 sm:mb-4 text-center">
+                      🎯 Lead Card {state.turn === 'bot' ? '(Bot)' : '(You)'}
+                    </div>
                     <div className="flex items-center gap-2 sm:gap-3 justify-center">
                       {Array.isArray(state.leadCard) ? (
                         <div className="flex gap-1 sm:gap-2">
                           {state.leadCard.map((card, idx) => (
-                            <Card
-                              key={idx}
-                              card={card}
-                              trumpSuit={state.trumpSuit}
-                              size="xlarge"
-                              className="border-blue-300 play-area"
-                            />
+                            <div key={idx} className="relative">
+                              <Card
+                                card={card}
+                                trumpSuit={state.trumpSuit}
+                                size="xlarge"
+                                className="border-blue-300 play-area"
+                              />
+                              {/* Position indicator for combo cards */}
+                              <div className="absolute -top-2 -right-2 bg-blue-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold">
+                                {idx + 1}
+                              </div>
+                            </div>
                           ))}
                         </div>
                       ) : (
@@ -307,16 +316,18 @@ function CardGameInner() {
                       )}
                     </div>
                   </div>
-                ) : (
-                  <div className={`px-3 sm:px-4 lg:px-8 py-2 sm:py-3 lg:py-4 rounded-2xl border-2 font-bold text-sm sm:text-lg lg:text-2xl transition-all duration-500 transform hover:scale-105 ${
-                    state.turn === 'human' 
-                      ? 'bg-gradient-to-r from-green-500 to-emerald-500 border-green-300 text-white shadow-2xl shadow-green-500/50 animate-pulse' 
-                      : 'bg-gradient-to-r from-blue-500 to-cyan-500 border-blue-300 text-white shadow-2xl shadow-blue-500/50 animate-pulse'
-                  }`}>
-                    {state.turn === 'human' ? '🎯 Your Turn' : '🤖 Bot\'s Turn'}
-                  </div>
-                )}
-              </div>
+
+                </div>
+              ) : (
+                // No lead card - show turn indicator
+                <div className={`px-3 sm:px-4 lg:px-8 py-2 sm:py-3 lg:py-4 rounded-2xl border-2 font-bold text-sm sm:text-lg lg:text-2xl transition-all duration-500 transform hover:scale-105 ${
+                  state.turn === 'human' 
+                    ? 'bg-gradient-to-r from-green-500 to-emerald-500 border-green-300 text-white shadow-2xl shadow-green-500/50 animate-pulse' 
+                    : 'bg-gradient-to-r from-blue-500 to-cyan-500 border-blue-300 text-white shadow-2xl shadow-blue-500/50 animate-pulse'
+                }`}>
+                  {state.turn === 'human' ? '🎯 Your Turn' : '🤖 Bot\'s Turn'}
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -324,44 +335,6 @@ function CardGameInner() {
         <section className="w-full bg-gray-800/90 backdrop-blur-sm rounded-xl shadow-lg border border-gray-600/30 p-3 sm:p-4">
           <div className="flex flex-col items-center gap-3 sm:gap-4">
             <div className="text-base sm:text-lg font-bold text-gray-100">🃏 Your Hand ({playerHand.length} cards)</div>
-          {selectedCombo.length > 0 && (
-            <div className="text-xs text-blue-600">
-              {isRespondingToCombo ? (
-                <div className="flex flex-col items-center gap-1">
-                  <div>Beat combo: {selectedCombo.length}/{state.leadCard.length}</div>
-                  <div className="flex gap-2 items-center">
-                    {selectedCombo.map((card, i) => (
-                      <div key={i} className="flex items-center gap-1">
-                        <Card
-                          card={card}
-                          trumpSuit={state.trumpSuit}
-                          size="small"
-                          className={canBeat(state.leadCard[i], card, state.trumpSuit) ? 'border-green-500' : 'border-red-500'}
-                        />
-                        <span className="text-xs">vs</span>
-                        <Card
-                          card={state.leadCard[i]}
-                          trumpSuit={state.trumpSuit}
-                          size="small"
-                          className="border-gray-400"
-                        />
-                        <span className={`text-xs font-bold ${canBeat(state.leadCard[i], card, state.trumpSuit) ? 'text-green-600' : 'text-red-600'}`}>
-                          {canBeat(state.leadCard[i], card, state.trumpSuit) ? '✓' : '✗'}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <>
-                  Combo: {selectedCombo.length}/{selectedCombo.length <= COMBO_SIZES.SMALL ? COMBO_SIZES.SMALL : COMBO_SIZES.LARGE} {isCombo(selectedCombo) ? '✓ Valid' : '✗ Invalid'}
-                  {selectedCombo.length > COMBO_SIZES.SMALL && !state.trumpCardDrawn && (
-                    <span className="ml-2 text-orange-600">🔒 5-card locked</span>
-                  )}
-                </>
-              )}
-            </div>
-          )}
           {state.leadCard && !isCombo(state.leadCard) && (
             <div className="text-xs text-orange-600 font-medium">
               ⚠️ Responding to single card - only single cards allowed (no combos)
@@ -384,7 +357,13 @@ function CardGameInner() {
                   onClick={() => handleCardClick(idx)}
                   onKeyDown={(e) => handleCardKeyDown(e, idx)}
                   size="large"
-                  className="focus:outline-none focus:ring-4 focus:ring-blue-400 touch-manipulation"
+                  className={`focus:outline-none focus:ring-4 focus:ring-blue-400 touch-manipulation transition-all duration-200 ${
+                    isInCombo 
+                      ? 'ring-4 ring-yellow-400 shadow-yellow-500/50 transform scale-105 opacity-75' 
+                      : isSelected 
+                        ? 'ring-4 ring-blue-400 shadow-blue-500/50 transform scale-105'
+                        : 'hover:scale-105 hover:shadow-lg'
+                  }`}
                 />
               );
             })}
@@ -429,7 +408,7 @@ function CardGameInner() {
                 onClick={onExchangeTrump}
                 aria-label={`Exchange 7 of ${getSuitName(state.trumpSuit)} for trump card`}
               >
-                🔄 Exchange 7{trumpIcon}
+                🔄 Exchange 7<span className={trumpSuitColor}>{trumpIcon}</span>
               </button>
             )}
           </div>
@@ -444,7 +423,15 @@ function CardGameInner() {
               {/* Trump Suit */}
               <div className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1 sm:py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
                 <div className="text-xs sm:text-sm font-semibold text-yellow-800">🃏 Trump:</div>
-                <div className="text-sm sm:text-lg">{trumpIcon}</div>
+                <div className="relative">
+                  <Card
+                    card={{ rank: 'A', suit: state.trumpSuit }}
+                    trumpSuit={state.trumpSuit}
+                    size="small"
+                    className="border-yellow-400"
+                    hideCenterSuit={true}
+                  />
+                </div>
                 <div className="text-xs sm:text-sm text-yellow-600">{state.trumpSuit}</div>
               </div>
 
@@ -458,6 +445,7 @@ function CardGameInner() {
                     size="small"
                           showBack={true}
                     className="border-blue-900"
+                          hideCenterSuit={true}
                         />
                   <div className="absolute -top-1 -right-1 bg-blue-500 text-white text-xs rounded-full w-3 h-3 sm:w-4 sm:h-4 flex items-center justify-center font-bold">
                       {state.deck.length}
@@ -487,6 +475,7 @@ function CardGameInner() {
                     trumpSuit={state.trumpSuit}
                     size="small"
                     className="border-gray-400"
+                    hideCenterSuit={true}
                   />
                 ) : (
                   <div className="w-5 h-6 sm:w-6 sm:h-8 bg-gray-200 rounded border border-dashed border-gray-400 flex items-center justify-center">

@@ -83,7 +83,13 @@ export function compareCards(a, b, trumpSuit) {
 
 export function canBeat(lead, response, trumpSuit) {
   if (!lead || !response) return false;
-  // Jokers always beat
+  
+  // Handle joker vs joker comparison
+  if (isJoker(lead) && isJoker(response)) {
+    return compareCards(lead, response, trumpSuit) < 0;
+  }
+  
+  // Jokers always beat non-jokers
   if (isJoker(response)) return true;
   if (isJoker(lead)) return false;
 
@@ -176,9 +182,15 @@ export function isCombo(cards) {
       return true;
     }
     
-    if (jokerCount === 1 && rankCountsArray.length >= 1) {
-      // 1 joker + any single card can form a pair
-      return true;
+    // 1 joker can only be used as a single card when there's already a natural pair
+    if (jokerCount === 1) {
+      // For a 3-card combo with 1 joker, we need at least one natural pair
+      // The joker can then be the third card (single)
+      // This means we need at least 2 cards of the same rank
+      const hasNaturalPair = rankCountsArray.some(count => count >= 2);
+      if (hasNaturalPair) {
+        return true;
+      }
     }
     
     return false;
@@ -200,7 +212,9 @@ export function isCombo(cards) {
     });
     
     // Add jokers to paired cards (2 jokers = 1 pair worth)
-    pairedCards += Math.floor((jokerCount + rankCountsArray.filter(c => c === 1).length) / 2) * 2;
+    // Only count jokers that can form pairs with other jokers or complete existing pairs
+    const jokerPairs = Math.floor(jokerCount / 2) * 2; // Only even numbers of jokers can form pairs
+    pairedCards += jokerPairs;
     
     // We need at least 4 cards that can form pairs (2 pairs worth)
     if (pairedCards >= 4) {
@@ -213,12 +227,29 @@ export function isCombo(cards) {
     
     // If we have at least 1 natural pair/triplet/quad
     if (pairRanks >= 1) {
-      // Count how many more pairs we can form with jokers and singles
-      const singles = rankCountsArray.filter(count => count === 1).length;
-      const availableForPairs = jokerCount + singles;
+      // For 5-card combos, we need at least 2 pairs total
+      // We already have 1 natural pair, so we need 1 more pair
+      // This can be formed by:
+      // 1. Another natural pair/triplet/quad
+      // 2. 2 jokers forming a pair
+      // 3. 1 joker completing a single card to form a pair
       
-      // We need at least 1 more pair (2 cards)
-      if (availableForPairs >= 2) {
+      if (pairRanks >= 2) {
+        // We have 2+ natural pairs
+        return true;
+      }
+      
+      // Check if we can form a second pair with jokers
+      const singles = rankCountsArray.filter(count => count === 1).length;
+      
+      // Case 1: 2 jokers can form a pair
+      if (jokerCount >= 2) {
+        return true;
+      }
+      
+      // Case 2: 1 joker can only be used as a single card when we already have 2 natural pairs
+      // (Jokers cannot create new pairs with single cards)
+      if (jokerCount === 1 && pairRanks >= 2) {
         return true;
       }
     }

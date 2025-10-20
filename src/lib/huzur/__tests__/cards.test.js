@@ -150,13 +150,14 @@ describe('Card Game Logic Tests', () => {
       ])).toBe(false);
     });
 
-    test('isCombo should accept 3-card combo with 1 joker as wildcard', () => {
+    test('isCombo should reject 3-card combo with 1 joker and 2 singles (BUG FIX)', () => {
+      // Joker cannot create a pair with a single card
       const combo = [
         { rank: '7', suit: 'H' },
-        { rank: 'BJ', suit: null },  // Joker acts as wildcard to pair with 7
+        { rank: 'BJ', suit: null },  // Joker cannot pair with single 7
         { rank: '8', suit: 'D' }
       ];
-      expect(isCombo(combo)).toBe(true);
+      expect(isCombo(combo)).toBe(false);
     });
 
     test('isCombo should accept 3-card combo with 2 jokers forming pair', () => {
@@ -168,16 +169,16 @@ describe('Card Game Logic Tests', () => {
       expect(isCombo(combo)).toBe(true);
     });
 
-    test('isCombo should accept 5-card combo with jokers completing pairs', () => {
-      // 1 pair + 1 joker + 2 singles = 2 pairs + 1 single
+    test('isCombo should reject 5-card combo with joker completing pair with single (BUG FIX)', () => {
+      // 1 pair + 1 joker + 2 singles = invalid (joker cannot pair with single)
       const combo = [
         { rank: '7', suit: 'H' },
         { rank: '7', suit: 'S' },
-        { rank: 'BJ', suit: null },  // Joker pairs with 8
+        { rank: 'BJ', suit: null },  // Joker cannot pair with single 8
         { rank: '8', suit: 'D' },
         { rank: '9', suit: 'H' }
       ];
-      expect(isCombo(combo)).toBe(true);
+      expect(isCombo(combo)).toBe(false);
     });
 
     test('isCombo should accept 5-card combo with 2 jokers as one pair', () => {
@@ -198,6 +199,26 @@ describe('Card Game Logic Tests', () => {
         { rank: 'BJ', suit: null },
         { rank: '8', suit: 'D' },
         { rank: '9', suit: 'H' }
+      ];
+      expect(isCombo(invalid)).toBe(false);
+    });
+
+    test('isCombo should reject J and Joker as a pair (BUG FIX)', () => {
+      // J and Joker should NOT be considered a valid pair
+      const invalid = [
+        { rank: 'J', suit: 'H' },
+        { rank: 'BJ', suit: null },
+        { rank: '8', suit: 'D' }
+      ];
+      expect(isCombo(invalid)).toBe(false);
+    });
+
+    test('isCombo should reject any single card with joker as a pair (BUG FIX)', () => {
+      // Any single card + joker should NOT be considered a valid pair
+      const invalid = [
+        { rank: 'Q', suit: 'H' },
+        { rank: 'RJ', suit: null },
+        { rank: '8', suit: 'D' }
       ];
       expect(isCombo(invalid)).toBe(false);
     });

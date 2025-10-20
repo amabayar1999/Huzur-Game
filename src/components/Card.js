@@ -12,7 +12,8 @@ export default function Card({
   onKeyDown,
   className = "",
   size = "normal", // "small", "normal", "large"
-  showBack = false // Show card back instead of face
+  showBack = false, // Show card back instead of face
+  hideCenterSuit = false // Hide or minimize center suit symbol
 }) {
   if (!card) return null;
 
@@ -99,17 +100,19 @@ export default function Card({
               </div>
               
               {/* Center symbol */}
-              <div className="card-center">
-                {cardText.isJoker ? (
-                  <div className="joker-symbol">
-                    <div className={`joker-text ${cardText.color}`}>JOKER</div>
-                  </div>
-                ) : (
-                  <div className={`center-suit ${cardText.color}`}>
-                    {cardText.centerText}
-                  </div>
-                )}
-              </div>
+              {!hideCenterSuit && (
+                <div className="card-center">
+                  {cardText.isJoker ? (
+                    <div className="joker-symbol">
+                      <div className={`joker-text ${cardText.color}`}>JOKER</div>
+                    </div>
+                  ) : (
+                    <div className={`center-suit ${cardText.color} ${hideCenterSuit ? 'center-suit-minimal' : ''}`}>
+                      {cardText.centerText}
+                    </div>
+                  )}
+                </div>
+              )}
               
               {/* Bottom-right corner (rotated) */}
               <div className="card-corner bottom-right">
