@@ -1,5 +1,5 @@
 import { canBeat, compareCards, isTrump, mustFollowSuit, getCardsInSuit, isJoker, isCombo, canBeatCombo, canBeatComboByPosition, canPlayCombo, getComboPlayOrder } from './cards';
-import { COMBO_SIZES, CARD_POWER, RANKS } from './constants';
+import { COMBO_SIZES, CARD_POWER, RANKS, DIFFICULTY_LEVELS } from './constants';
 
 // Strategic game phase detection
 function getGamePhase(deckLength, trumpCardDrawn) {
@@ -11,19 +11,31 @@ function getGamePhase(deckLength, trumpCardDrawn) {
   return 'late';
 }
 
-// Determine if bot should conserve trump cards
-function shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn) {
-  // Be more conservative with trumps in early game, but not overly so
-  if (gamePhase === 'early') return true;
+// Determine if bot should conserve trump cards based on difficulty
+function shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn, difficulty = DIFFICULTY_LEVELS.MEDIUM) {
+  // Ensure difficulty is not null and has required properties
+  const safeDifficulty = difficulty || DIFFICULTY_LEVELS.MEDIUM;
+  const baseConservation = safeDifficulty.trumpConservation || 0.5;
+  
+  // Adjust based on game phase
+  let phaseModifier = 0;
+  if (gamePhase === 'early') phaseModifier = 0.2;      // More conservative early
+  else if (gamePhase === 'mid') phaseModifier = 0;     // Balanced mid game
+  else phaseModifier = -0.3;                           // More aggressive late game
   
   // If deck is running low, be more aggressive
-  if (deckLength < 10) return false;
+  if (deckLength < 10) phaseModifier -= 0.4;
   
-  // If trump card not drawn yet, be moderately conservative
-  if (!trumpCardDrawn) return true;
+  // If trump card not drawn yet, be more conservative
+  if (!trumpCardDrawn) phaseModifier += 0.2;
   
-  // In mid game, be balanced (not too conservative)
-  return gamePhase === 'mid';
+  // Apply endgame aggression modifier
+  if (deckLength < 5) {
+    phaseModifier -= (safeDifficulty.endgameAggression || 0.7) * 0.5;
+  }
+  
+  const finalConservation = Math.max(0, Math.min(1, baseConservation + phaseModifier));
+  return finalConservation > 0.5;
 }
 
 // Count trump cards in hand
@@ -42,8 +54,11 @@ function adjustStrategyForTrumpCount(trumpCount, gamePhase) {
   return 'balanced';
 }
 
-// Enhanced card power calculation with strategic considerations
-function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount) {
+// Enhanced card power calculation with strategic considerations and difficulty
+function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount, difficulty = DIFFICULTY_LEVELS.MEDIUM, context = {}) {
+  // Ensure difficulty is not null and has required properties
+  const safeDifficulty = difficulty || DIFFICULTY_LEVELS.MEDIUM;
+  
   const basePower = isJoker(card) ? CARD_POWER.JOKER : 
     RANKS.indexOf(card.rank) * CARD_POWER.BASE_RANK_MULTIPLIER;
   
@@ -51,13 +66,15 @@ function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve,
   let strategicValue = basePower;
   
   if (isTrump(card, trumpSuit)) {
-    // Trump cards are more valuable - but allow lower-value trumps
+    // Trump cards are more valuable - adjust based on difficulty and context
     if (shouldConserve) {
-      // Only add penalty for high-value trump cards
+      // Scale penalties based on difficulty level
+      const penaltyMultiplier = safeDifficulty.trumpConservation || 0.5;
+      
       if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
-        strategicValue += 50; // High-value trumps get penalty
+        strategicValue += 50 * penaltyMultiplier; // High-value trumps get penalty
       } else if (card.rank === 'K' || card.rank === 'Q' || card.rank === 'J') {
-        strategicValue += 20; // Medium-value trumps get smaller penalty
+        strategicValue += 20 * penaltyMultiplier; // Medium-value trumps get smaller penalty
       }
       // Low-value trumps (7, 8, 9, 10) get no penalty - can be used freely
     }
@@ -67,19 +84,60 @@ function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve,
     if (strategy === 'very_conservative') {
       // Even in very conservative mode, allow low-value trumps
       if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
-        strategicValue += 40;
+        strategicValue += 40 * (safeDifficulty.trumpConservation || 0.5);
       } else if (card.rank === 'K' || card.rank === 'Q' || card.rank === 'J') {
-        strategicValue += 15;
+        strategicValue += 15 * (safeDifficulty.trumpConservation || 0.5);
       }
       // Low-value trumps still get no penalty
     } else if (strategy === 'aggressive') {
-      strategicValue -= 20;
+      strategicValue -= 20 * (1 - (safeDifficulty.trumpConservation || 0.5));
+    }
+    
+    // Context-aware trump usage
+    if (context.forceOpponentPickup && context.pileSize > 3) {
+      // If we can force opponent to pick up a large pile, be more aggressive with trumps
+      strategicValue -= 30 * (1 - (safeDifficulty.trumpConservation || 0.5));
+    }
+    
+    if (context.endgamePressure && context.deckLength < 5) {
+      // In endgame, use trumps more aggressively
+      strategicValue -= 25 * (1 - (safeDifficulty.trumpConservation || 0.5));
+    }
+    
+    if (context.opponentWeakness && context.opponentTrumpsPlayed > 1) {
+      // If opponent has played many trumps, exploit their weakness
+      strategicValue -= 20 * (1 - (safeDifficulty.trumpConservation || 0.5));
     }
   }
   
-  // Jokers are always very valuable
+  // Enhanced joker strategy
   if (isJoker(card)) {
-    strategicValue += shouldConserve ? 100 : 50;
+    let jokerValue = shouldConserve ? 100 : 50;
+    
+    // Joker type-specific strategy
+    if (card.rank === 'RJ') {
+      // Red Joker (♥♦) - more aggressive in hearts/diamonds situations
+      if (context.leadCard && (context.leadCard.suit === 'H' || context.leadCard.suit === 'D')) {
+        jokerValue -= 20; // Use Red Joker more readily against hearts/diamonds
+      }
+    } else if (card.rank === 'BJ') {
+      // Black Joker (♠♣) - more aggressive in spades/clubs situations
+      if (context.leadCard && (context.leadCard.suit === 'S' || context.leadCard.suit === 'C')) {
+        jokerValue -= 20; // Use Black Joker more readily against spades/clubs
+      }
+    }
+    
+    // Save jokers for critical moments
+    if (context.criticalMoment) {
+      jokerValue += 30; // Save jokers for critical moments
+    }
+    
+    // Use jokers when opponent is likely to have strong cards
+    if (context.opponentStrongHand) {
+      jokerValue -= 25; // Use jokers to counter strong opponent hands
+    }
+    
+    strategicValue += jokerValue * (safeDifficulty.trumpConservation || 0.5);
   }
   
   return strategicValue;
@@ -287,19 +345,195 @@ function findCombos(hand, trumpCardDrawn = true, isRespondingTo5CardCombo = fals
   return combos;
 }
 
-export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = true, opponentHandSize = null, deckLength = 54) {
+// Enhanced opponent hand tracking and prediction
+function trackOpponentCards(playedCards, opponentHandSize, trumpSuit) {
+  const opponentPlayed = playedCards.filter(play => play.player === 'human');
+  const suitsPlayed = {};
+  const ranksPlayed = {};
+  let trumpCardsPlayed = 0;
+  let jokersPlayed = 0;
+  const recentPlays = opponentPlayed.slice(-5); // Last 5 plays for pattern analysis
+  
+  opponentPlayed.forEach(card => {
+    if (isTrump(card, trumpSuit)) {
+      trumpCardsPlayed++;
+    }
+    if (isJoker(card)) {
+      jokersPlayed++;
+    }
+    suitsPlayed[card.suit] = (suitsPlayed[card.suit] || 0) + 1;
+    ranksPlayed[card.rank] = (ranksPlayed[card.rank] || 0) + 1;
+  });
+  
+  return {
+    suitsPlayed,
+    ranksPlayed,
+    trumpCardsPlayed,
+    jokersPlayed,
+    totalPlayed: opponentPlayed.length,
+    recentPlays,
+    opponentHandSize
+  };
+}
+
+// Enhanced opponent hand prediction with advanced analysis
+function predictOpponentHand(opponentInfo, trumpSuit, difficulty) {
+  const safeDifficulty = difficulty || DIFFICULTY_LEVELS.MEDIUM;
+  if (!safeDifficulty.prediction) {
+    return { likelyTrumps: 0, weakSuits: [], strongSuits: [], handStrength: 'unknown' };
+  }
+  
+  // Basic prediction based on played cards
+  const likelyTrumps = Math.max(0, 2 - opponentInfo.trumpCardsPlayed); // Assume 2 trumps per player on average
+  const likelyJokers = Math.max(0, 1 - opponentInfo.jokersPlayed); // Assume 1 joker per player on average
+  
+  const weakSuits = Object.keys(opponentInfo.suitsPlayed).filter(suit => 
+    opponentInfo.suitsPlayed[suit] >= 2 // If they've played 2+ of a suit, likely weak
+  );
+  const strongSuits = Object.keys(opponentInfo.suitsPlayed).filter(suit => 
+    opponentInfo.suitsPlayed[suit] === 1 // If they've only played 1, might be strong
+  );
+  
+  // Analyze hand strength based on recent plays
+  let handStrength = 'unknown';
+  if (opponentInfo.recentPlays.length >= 3) {
+    const recentTrumps = opponentInfo.recentPlays.filter(card => isTrump(card, trumpSuit)).length;
+    const recentJokers = opponentInfo.recentPlays.filter(card => isJoker(card)).length;
+    
+    if (recentTrumps >= 2 || recentJokers >= 1) {
+      handStrength = 'weak'; // Playing many trumps/jokers suggests weak hand
+    } else if (recentTrumps === 0 && recentJokers === 0) {
+      handStrength = 'strong'; // Not using trumps/jokers suggests strong hand
+    }
+  }
+  
+  return { 
+    likelyTrumps, 
+    likelyJokers,
+    weakSuits, 
+    strongSuits, 
+    handStrength,
+    trumpCardsPlayed: opponentInfo.trumpCardsPlayed,
+    jokersPlayed: opponentInfo.jokersPlayed
+  };
+}
+
+// Build strategic context for decision making
+function buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSuit, gamePhase) {
+  const context = {
+    leadCard,
+    pileSize: pile ? pile.length : 0,
+    deckLength,
+    gamePhase,
+    forceOpponentPickup: false,
+    endgamePressure: false,
+    opponentWeakness: false,
+    criticalMoment: false,
+    opponentStrongHand: false,
+    opponentTrumpsPlayed: opponentInfo.trumpCardsPlayed || 0
+  };
+  
+  // Determine if we can force opponent pickup
+  if (pile && pile.length > 3) {
+    context.forceOpponentPickup = true;
+  }
+  
+  // Endgame pressure
+  if (deckLength < 5) {
+    context.endgamePressure = true;
+  }
+  
+  // Opponent weakness indicators
+  if (opponentInfo.trumpCardsPlayed > 1) {
+    context.opponentWeakness = true;
+  }
+  
+  // Critical moments (late game, high pile, etc.)
+  if (deckLength < 10 || (pile && pile.length > 2)) {
+    context.criticalMoment = true;
+  }
+  
+  // Opponent hand strength
+  if (opponentInfo.handStrength === 'strong') {
+    context.opponentStrongHand = true;
+  }
+  
+  return context;
+}
+
+// Enhanced combo selection with trump/joker strategy
+function findOptimalCombos(hand, trumpCardDrawn, isRespondingTo5CardCombo, opponentInfo, trumpSuit, difficulty) {
+  const combos = findCombos(hand, trumpCardDrawn, isRespondingTo5CardCombo);
+  const safeDifficulty = difficulty || DIFFICULTY_LEVELS.MEDIUM;
+  
+  if (!safeDifficulty.prediction || !opponentInfo) {
+    return combos;
+  }
+  
+  // Analyze combos for trump/joker usage
+  const analyzedCombos = combos.map(combo => {
+    const trumpCount = combo.filter(card => isTrump(card, trumpSuit)).length;
+    const jokerCount = combo.filter(card => isJoker(card)).length;
+    const hasHighValueTrump = combo.some(card => 
+      isTrump(card, trumpSuit) && (card.rank === 'A' || card.rank === '2' || card.rank === '3')
+    );
+    
+    return {
+      combo,
+      trumpCount,
+      jokerCount,
+      hasHighValueTrump,
+      strategicValue: trumpCount * 10 + jokerCount * 20 + (hasHighValueTrump ? 15 : 0)
+    };
+  });
+  
+  // Filter combos that opponent likely can't beat
+  return analyzedCombos.filter(comboData => {
+    const combo = comboData.combo;
+    
+    // If opponent has fewer cards than combo size, they can't respond
+    if (opponentInfo.opponentHandSize < combo.length) return true;
+    
+    // For higher difficulties, be more strategic about combo selection
+    if ((safeDifficulty.comboAggression || 0.6) > 0.8) {
+      // Prefer combos with fewer trump cards when opponent is weak
+      if (opponentInfo.trumpCardsPlayed > 1 && comboData.trumpCount > 1) {
+        return false; // Don't waste trumps when opponent is weak
+      }
+      
+      // Use high-value trump combos when opponent is strong
+      if (opponentInfo.handStrength === 'strong' && comboData.hasHighValueTrump) {
+        return true; // Use strong trump combos against strong opponents
+      }
+    }
+    
+    return true;
+  }).map(comboData => comboData.combo);
+}
+
+export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = true, opponentHandSize = null, deckLength = 54, difficulty = DIFFICULTY_LEVELS.MEDIUM, playedCards = [], pile = []) {
+  // Ensure difficulty is not null
+  const safeDifficulty = difficulty || DIFFICULTY_LEVELS.MEDIUM;
+  
   // Calculate strategic parameters
   const gamePhase = getGamePhase(deckLength, trumpCardDrawn);
-  const shouldConserve = shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn);
+  const shouldConserve = shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn, safeDifficulty);
   const trumpCount = countTrumpsInHand(hand, trumpSuit);
+  
+  // Track opponent's played cards for prediction
+  const opponentInfo = trackOpponentCards(playedCards, opponentHandSize, trumpSuit);
+  const opponentPrediction = predictOpponentHand(opponentInfo, trumpSuit, safeDifficulty);
+  
+  // Build strategic context
+  const context = buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSuit, gamePhase);
   
   // When responding to a card, be less conservative to avoid picking up
   const isResponding = leadCard !== null;
   const shouldConserveWhenResponding = isResponding ? false : shouldConserve;
   
   if (!leadCard) {
-    // Bot is leading - use strategic card selection
-    const combos = findCombos(hand, trumpCardDrawn, false);
+    // Bot is leading - use strategic card selection with difficulty
+    const combos = findOptimalCombos(hand, trumpCardDrawn, false, { opponentHandSize }, trumpSuit, safeDifficulty);
     
     // Filter out combos that the opponent can't respond to
     const playableCombos = combos.filter(combo => {
@@ -310,21 +544,22 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
       return opponentHandSize >= combo.length;
     });
     
-    if (playableCombos.length > 0) {
+    // Adjust combo selection based on difficulty
+    if (playableCombos.length > 0 && Math.random() < (safeDifficulty.comboAggression || 0.6)) {
       // Play the combo with the lowest strategic value
       return playableCombos.sort((a, b) => {
         const aValue = a.reduce((sum, card) => 
-          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount, safeDifficulty, context), 0);
         const bValue = b.reduce((sum, card) => 
-          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount, safeDifficulty, context), 0);
         return aValue - bValue;
       })[0];
     }
     
-    // For single cards, use strategic sorting
+    // For single cards, use strategic sorting with difficulty
     return hand.sort((a, b) => {
-      const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserve, trumpCount);
-      const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserve, trumpCount);
+      const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserve, trumpCount, safeDifficulty, context);
+      const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserve, trumpCount, safeDifficulty, context);
       return aValue - bValue;
     })[0];
   }
@@ -333,7 +568,7 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
   if (isCombo(leadCard)) {
     // Must respond with cards that beat the lead combo
     const isRespondingTo5CardCombo = leadCard.length === COMBO_SIZES.LARGE;
-    const combos = findCombos(hand, trumpCardDrawn, isRespondingTo5CardCombo);
+    const combos = findOptimalCombos(hand, trumpCardDrawn, isRespondingTo5CardCombo, { opponentHandSize }, trumpSuit, safeDifficulty);
     
     // Filter out combos that the opponent can't respond to
     const playableCombos = combos.filter(combo => {
@@ -358,9 +593,9 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
       // Play the combo with the lowest strategic value that still beats
       return beatingCombosWithOrder.sort((a, b) => {
         const aValue = a.reduce((sum, card) => 
-          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount, safeDifficulty, context), 0);
         const bValue = b.reduce((sum, card) => 
-          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount), 0);
+          sum + calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve, trumpCount, safeDifficulty, context), 0);
         return aValue - bValue;
       })[0];
     }
@@ -379,8 +614,8 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
     if (beatingInSuit.length > 0) {
       // Play lowest strategic value card that still beats
       return beatingInSuit.sort((a, b) => {
-        const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
-        const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
+        const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount, safeDifficulty, context);
+        const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount, safeDifficulty, context);
         return aValue - bValue;
       })[0];
     }
@@ -395,8 +630,8 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
   if (beatingTrumps.length > 0) {
     // Use strategic value for trump selection (less conservative when responding)
     return beatingTrumps.sort((a, b) => {
-      const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
-      const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount);
+      const aValue = calculateStrategicCardValue(a, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount, safeDifficulty, context);
+      const bValue = calculateStrategicCardValue(b, trumpSuit, gamePhase, shouldConserveWhenResponding, trumpCount, safeDifficulty, context);
       return aValue - bValue;
     })[0];
   }

@@ -1,15 +1,15 @@
 @import "tailwindcss";
 
+@theme {
+  --color-background: #ffffff;
+  --color-foreground: #171717;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,4 +23,434 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Popup animations */
+@keyframes popupFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes popupSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-50px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.popup-enter {
+  animation: popupFadeIn 0.3s ease-out;
+}
+
+.popup-backdrop {
+  animation: popupSlideIn 0.2s ease-out;
+}
+
+/* Card Component Styles */
+.card-component {
+  position: relative;
+  background: linear-gradient(145deg, #ffffff 0%, #f8f9fa 100%);
+  border: 2px solid #333;
+  border-radius: 0px;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1), 0 1px 3px rgba(0,0,0,0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Arial', sans-serif;
+  font-weight: bold;
+  overflow: hidden;
+}
+
+.card-component::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(45deg, transparent 30%, rgba(255,255,255,0.1) 50%, transparent 70%);
+  transform: translateX(-100%);
+  transition: transform 0.6s ease;
+}
+
+.card-component:hover::before {
+  transform: translateX(100%);
+}
+
+.card-component:hover {
+  transform: translateY(-2px) scale(1.05);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+}
+
+.card-component.selected {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.3);
+  transform: translateY(-4px) scale(1.1);
+}
+
+.card-component.in-combo {
+  border-color: #10b981;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.3);
+  transform: translateY(-4px) scale(1.1);
+}
+
+.card-component.trump {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border-color: #f59e0b;
+}
+
+.card-component.joker {
+  background: linear-gradient(145deg, #ffffff 0%, #f8f9fa 100%);
+  border: 2px solid #333;
+  position: relative;
+}
+
+.card-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px;
+}
+
+.card-corner {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1;
+}
+
+.card-corner.top-left {
+  top: 2px;
+  left: 2px;
+}
+
+.card-corner.bottom-right {
+  bottom: 2px;
+  right: 2px;
+  transform: rotate(180deg);
+}
+
+.card-rank {
+  font-size: 0.9em;
+  font-weight: bold;
+  margin-bottom: -2px;
+}
+
+.card-suit {
+  font-size: 0.6em;
+}
+
+.card-rank.red,
+.card-suit.red {
+  color: #dc2626;
+}
+
+.card-rank.black,
+.card-suit.black {
+  color: #1f2937;
+}
+
+.card-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.center-suit {
+  font-size: 1.6em;
+  font-weight: bold;
+}
+
+.center-suit.red {
+  color: #dc2626;
+}
+
+.center-suit.black {
+  color: #1f2937;
+}
+
+.joker-symbol {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.joker-text {
+  font-size: 0.4em;
+  font-weight: bold;
+  text-align: center;
+  line-height: 1;
+  margin-bottom: 2px;
+}
+
+.joker-text.red {
+  color: #dc2626;
+}
+
+.joker-text.black {
+  color: #1f2937;
+}
+
+/* Size variations - responsive (increased for better mobile readability) */
+.card-component.w-6 {
+  min-width: 24px;
+  width: 24px;
+}
+
+.card-component.w-8 {
+  min-width: 32px;
+  width: 32px;
+}
+
+.card-component.w-10 {
+  min-width: 40px;
+  width: 40px;
+}
+
+.card-component.w-12 {
+  min-width: 48px;
+  width: 48px;
+}
+
+.card-component.w-14 {
+  min-width: 56px;
+  width: 56px;
+}
+
+.card-component.w-16 {
+  min-width: 64px;
+  width: 64px;
+}
+
+.card-component.w-20 {
+  min-width: 80px;
+  width: 80px;
+}
+
+.card-component.w-24 {
+  min-width: 96px;
+  width: 96px;
+}
+
+.card-component.w-28 {
+  min-width: 112px;
+  width: 112px;
+}
+
+.card-component.h-9 {
+  min-height: 36px;
+  height: 36px;
+}
+
+.card-component.h-12 {
+  min-height: 48px;
+  height: 48px;
+}
+
+.card-component.h-14 {
+  min-height: 56px;
+  height: 56px;
+}
+
+.card-component.h-16 {
+  min-height: 64px;
+  height: 64px;
+}
+
+.card-component.h-18 {
+  min-height: 72px;
+  height: 72px;
+}
+
+.card-component.h-20 {
+  min-height: 80px;
+  height: 80px;
+}
+
+.card-component.h-24 {
+  min-height: 96px;
+  height: 96px;
+}
+
+.card-component.h-28 {
+  min-height: 112px;
+  height: 112px;
+}
+
+/* Card Image Styles */
+.card-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+/* Card Back Styles */
+.card-back {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 50%, #1e40af 100%);
+  border-radius: inherit;
+}
+
+.card-back-pattern {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80%;
+  height: 80%;
+  background: linear-gradient(45deg, rgba(255,255,255,0.1) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.1) 75%);
+  background-size: 8px 8px;
+  border-radius: 8px;
+  border: 2px solid rgba(255,255,255,0.2);
+}
+
+.back-symbol {
+  font-size: 1.5em;
+  color: white;
+  text-shadow: 0 0 4px rgba(0,0,0,0.5);
+}
+
+/* Card Fallback Styles */
+.card-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #6b7280 0%, #9ca3af 100%);
+  border-radius: inherit;
+}
+
+.fallback-text {
+  font-size: 1.2em;
+  font-weight: bold;
+  color: white;
+  text-shadow: 0 0 4px rgba(0,0,0,0.5);
+}
+
+/* Play Area Card Enhancements */
+.card-component.play-area {
+  box-shadow: 0 8px 16px rgba(0,0,0,0.15), 0 4px 8px rgba(0,0,0,0.1);
+  border-width: 3px;
+  transform: scale(1.05);
+}
+
+.card-component.play-area:hover {
+  transform: scale(1.1);
+  box-shadow: 0 12px 24px rgba(0,0,0,0.2), 0 6px 12px rgba(0,0,0,0.15);
+}
+
+/* Enhanced mobile touch experience */
+@media (max-width: 640px) {
+  .card-component {
+    border-width: 2px;
+    min-height: 56px;
+    min-width: 56px;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    /* Larger touch targets */
+    min-width: 60px;
+    min-height: 84px;
+  }
+  
+  .card-component.selected,
+  .card-component.in-combo {
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.4);
+    transform: translateY(-3px) scale(1.08);
+  }
+  
+  .card-component.play-area {
+    transform: scale(1.05);
+  }
+  
+  .card-component.play-area:hover {
+    transform: scale(1.08);
+  }
+  
+  .card-component:hover {
+    transform: translateY(-2px) scale(1.03);
+  }
+  
+  /* Better text sizing for mobile cards */
+  .card-rank {
+    font-size: 1.1em;
+  }
+  
+  .card-suit {
+    font-size: 0.8em;
+  }
+  
+  .center-suit {
+    font-size: 2em;
+  }
+  
+  .joker-text {
+    font-size: 0.6em;
+  }
+}
+
+/* Extra small screens - even better readability */
+@media (max-width: 480px) {
+  .card-component {
+    border-width: 2px;
+    min-height: 60px;
+    min-width: 60px;
+  }
+  
+  /* Better text sizing for very small screens */
+  .card-rank {
+    font-size: 1em;
+  }
+  
+  .card-suit {
+    font-size: 0.7em;
+  }
+  
+  .center-suit {
+    font-size: 1.8em;
+  }
+  
+  .joker-text {
+    font-size: 0.55em;
+  }
+}
+
+/* Portrait mode optimizations */
+@media (max-width: 640px) and (orientation: portrait) {
+  .card-component {
+    /* Slightly larger in portrait for better readability */
+    transform: scale(1.08);
+  }
+}
+
+/* Landscape mode - can use smaller cards since more horizontal space */
+@media (max-width: 896px) and (orientation: landscape) {
+  .card-component {
+    transform: scale(0.98);
+  }
 }

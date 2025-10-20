@@ -1,6 +1,6 @@
 import { createDeck, jokerToTrumpSuit, isJoker, formatCard, sortCardsForDisplay, canBeat, canPlayCard, mustFollowSuit, isCombo, canPlayCombo, canBeatCombo, canBeatComboByPosition, getComboPlayOrder, suitToIcon } from './cards';
 import { chooseBotResponse } from './bot';
-import { HAND_SIZE, COMBO_SIZES } from './constants';
+import { HAND_SIZE, COMBO_SIZES, DIFFICULTY_LEVELS } from './constants';
 
 // Helper: Deal cards from deck
 function deal(deck, count) {
@@ -63,7 +63,7 @@ function checkWinCondition(hand) {
 
 // Helper: Handle bot playing a card (single or combo)
 function playBotCard(state, choice) {
-  let newBotHand, newPile, newLastPlay, newLog;
+  let newBotHand, newPile, newLastPlay, newLog, newPlayedCards;
   
   if (Array.isArray(choice)) {
     // Bot played a combo
@@ -72,6 +72,7 @@ function playBotCard(state, choice) {
     newPile = [...state.pile, ...choice];
     newLastPlay = { ...state.lastPlay, bot: choice };
     newLog = [...state.log, `Bot played combo (${choice.length} cards) - Pile: ${state.pile.length} -> ${newPile.length} cards`];
+    newPlayedCards = [...state.playedCards, ...choice.map(card => ({ card, player: 'bot' }))];
   } else {
     // Bot played a single card
     const idx = state.hands.bot.findIndex(c => c === choice);
@@ -79,14 +80,15 @@ function playBotCard(state, choice) {
     newPile = [...state.pile, choice];
     newLastPlay = { ...state.lastPlay, bot: choice };
     newLog = [...state.log, `Bot played ${formatCard(choice)}`];
+    newPlayedCards = [...state.playedCards, { card: choice, player: 'bot' }];
   }
   
-  return { newBotHand, newPile, newLastPlay, newLog, playedCard: choice };
+  return { newBotHand, newPile, newLastPlay, newLog, playedCard: choice, newPlayedCards };
 }
 
 // Helper: Handle bot leading after winning trick
 function handleBotLead(state, botHand, deadPile, log) {
-  const nextChoice = chooseBotResponse(null, botHand, state.trumpSuit, state.trumpCardDrawn, state.hands.human.length, state.deck.length);
+  const nextChoice = chooseBotResponse(null, botHand, state.trumpSuit, state.trumpCardDrawn, state.hands.human.length, state.deck.length, state.difficulty, state.playedCards, []);
   if (!nextChoice) {
     // Bot can't lead (shouldn't happen), pass turn to human
     return {
@@ -100,7 +102,7 @@ function handleBotLead(state, botHand, deadPile, log) {
     };
   }
   
-  const { newBotHand, newPile, newLastPlay, newLog } = playBotCard(
+  const { newBotHand, newPile, newLastPlay, newLog, newPlayedCards } = playBotCard(
     { ...state, hands: { ...state.hands, bot: botHand }, pile: [] }, 
     nextChoice
   );
@@ -129,11 +131,12 @@ function handleBotLead(state, botHand, deadPile, log) {
     lastPlay: newLastPlay,
     log: finalLog,
     winner: newWinner,
-    trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
+    trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn,
+    playedCards: newPlayedCards
   };
 }
 
-export function initGame() {
+export function initGame(difficulty = DIFFICULTY_LEVELS.MEDIUM) {
   const deck = createDeck();
   const human = deal(deck, HAND_SIZE);
   const bot = deal(deck, HAND_SIZE);
@@ -143,6 +146,7 @@ export function initGame() {
   const log = [];
   log.push(`Trump is ${trumpSuit || 'None'} from ${formatCard(trumpCard)} (card remains under deck, will be drawn last)`);
   log.push(`5-card combos will be unlocked when the trump card is drawn!`);
+  log.push(`Bot difficulty: ${difficulty?.name || 'Medium'}`);
   return {
     deck,
     trumpCard, // Keep trump card reference (it's at deck[0])
@@ -156,6 +160,8 @@ export function initGame() {
     lastPlay: {},
     winner: null,
     log,
+    difficulty, // Add difficulty to game state
+    playedCards: [], // Track all played cards for bot prediction
   };
 }
 
@@ -169,7 +175,16 @@ export function gameReducer(state, action) {
   
   // Always allow RESET, even if there's a winner
   if (action.type === 'RESET') {
-    return initGame();
+    return initGame(action.difficulty || state?.difficulty || DIFFICULTY_LEVELS.MEDIUM);
+  }
+  
+  // Handle difficulty change
+  if (action.type === 'CHANGE_DIFFICULTY') {
+    return {
+      ...state,
+      difficulty: action.difficulty,
+      log: [...state.log, `Bot difficulty changed to: ${action.difficulty.name}`]
+    };
   }
   
   if (state.winner) return state;
@@ -195,6 +210,7 @@ export function gameReducer(state, action) {
     const newHumanHand = removeCardsFromHand(state.hands.human, [idx]);
     const newPile = [...state.pile, card];
     const newLastPlay = { ...state.lastPlay, human: card };
+    const newPlayedCards = [...state.playedCards, { card, player: 'human' }];
     
     // Check for win condition BEFORE drawing
     const newWinner = checkWinCondition(newHumanHand) ? 'human' : state.winner;
@@ -288,6 +304,7 @@ export function gameReducer(state, action) {
     const newHumanHand = removeCardsFromHand(state.hands.human, indices);
     const newPile = [...state.pile, ...combo];
     const newLastPlay = { ...state.lastPlay, human: combo };
+    const newPlayedCards = [...state.playedCards, ...combo.map(card => ({ card, player: 'human' }))];
     
     // Add logging for combo play
     const comboLog = [...state.log, `You played combo (${combo.length} cards) - Pile: ${state.pile.length} -> ${newPile.length} cards`];
@@ -379,6 +396,11 @@ export function gameReducer(state, action) {
       return { ...state, log: [...state.log, `Cannot exchange: need 7 of trump and trump card must be available`] };
     }
     
+    // Prevent exchange after deck is exhausted
+    if (state.deck.length === 0) {
+      return { ...state, log: [...state.log, `Cannot exchange: deck is exhausted - no more cards to draw`] };
+    }
+    
     const newHumanHand = state.hands.human.filter(card => card !== sevenOfTrump);
     newHumanHand.push(state.trumpCard);
     
@@ -404,7 +426,7 @@ export function gameReducer(state, action) {
   }
   case 'BOT_ACT': {
     if (state.turn !== 'bot') return state;
-    const choice = chooseBotResponse(state.leadCard, state.hands.bot, state.trumpSuit, state.trumpCardDrawn, state.hands.human.length, state.deck.length);
+    const choice = chooseBotResponse(state.leadCard, state.hands.bot, state.trumpSuit, state.trumpCardDrawn, state.hands.human.length, state.deck.length, state.difficulty, state.playedCards, state.pile);
     
     if (!choice) {
       // Bot picks up (only when responding, not when leading)
@@ -424,7 +446,7 @@ export function gameReducer(state, action) {
     }
     
     // Bot plays a card
-    const { newBotHand, newPile, newLastPlay, newLog } = playBotCard(state, choice);
+    const { newBotHand, newPile, newLastPlay, newLog, newPlayedCards } = playBotCard(state, choice);
     
     // Check for win condition BEFORE drawing
     const newWinner = checkWinCondition(newBotHand) ? 'bot' : state.winner;
@@ -469,7 +491,8 @@ export function gameReducer(state, action) {
           lastPlay: newLastPlay,
           log: finalLog,
           winner: newWinner,
-          trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
+          trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn,
+          playedCards: newPlayedCards
         };
       }
     } else {
@@ -493,7 +516,8 @@ export function gameReducer(state, action) {
           lastPlay: newLastPlay,
           log: finalLog,
           winner: newWinner,
-          trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
+          trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn,
+          playedCards: newPlayedCards
         };
       }
       
@@ -507,7 +531,8 @@ export function gameReducer(state, action) {
         lastPlay: newLastPlay,
         log: finalLog,
         winner: newWinner,
-        trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn
+        trumpCardDrawn: state.trumpCardDrawn || trumpCardWasDrawn,
+        playedCards: newPlayedCards
       };
     }
   }
