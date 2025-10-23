@@ -1,14 +1,16 @@
 import { canBeat, compareCards, isTrump, mustFollowSuit, getCardsInSuit, isJoker, isCombo, canBeatCombo, canBeatComboByPosition, canPlayCombo, getComboPlayOrder } from './cards';
 import { COMBO_SIZES, CARD_POWER, RANKS, DIFFICULTY_LEVELS } from './constants';
 
-// Strategic game phase detection
+// Strategic game phase detection with enhanced endgame phases
 function getGamePhase(deckLength, trumpCardDrawn) {
   const totalCards = 54; // 52 cards + 2 jokers
   const cardsPlayed = totalCards - deckLength;
   
-  if (cardsPlayed < 20) return 'early';
-  if (cardsPlayed < 40) return 'mid';
-  return 'late';
+  if (cardsPlayed < 15) return 'early';
+  if (cardsPlayed < 30) return 'mid';
+  if (cardsPlayed < 45) return 'late';
+  if (deckLength < 8) return 'critical';  // New critical phase
+  return 'endgame';  // New endgame phase
 }
 
 // Determine if bot should conserve trump cards based on difficulty
@@ -17,17 +19,20 @@ function shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn, difficulty 
   const safeDifficulty = difficulty || DIFFICULTY_LEVELS.MEDIUM;
   const baseConservation = safeDifficulty.trumpConservation || 0.5;
   
-  // Adjust based on game phase
+  // Adjust based on game phase with enhanced endgame logic
   let phaseModifier = 0;
-  if (gamePhase === 'early') phaseModifier = 0.2;      // More conservative early
-  else if (gamePhase === 'mid') phaseModifier = 0;     // Balanced mid game
-  else phaseModifier = -0.3;                           // More aggressive late game
+  if (gamePhase === 'early') phaseModifier = 0.3;      // More conservative early
+  else if (gamePhase === 'mid') phaseModifier = 0.1;   // Slightly conservative mid
+  else if (gamePhase === 'late') phaseModifier = -0.1; // Start becoming aggressive
+  else if (gamePhase === 'critical') phaseModifier = -0.2; // More aggressive in critical
+  else phaseModifier = -0.4;                           // Very aggressive in endgame
   
-  // If deck is running low, be more aggressive
-  if (deckLength < 10) phaseModifier -= 0.4;
+  // Enhanced endgame logic - start conserving earlier
+  if (deckLength < 10) phaseModifier -= 0.3;  // Earlier trigger for endgame pressure
+  if (deckLength < 5) phaseModifier -= 0.4;   // Strong endgame pressure
   
   // If trump card not drawn yet, be more conservative
-  if (!trumpCardDrawn) phaseModifier += 0.2;
+  if (!trumpCardDrawn) phaseModifier += 0.3;
   
   // Apply endgame aggression modifier
   if (deckLength < 5) {
@@ -35,7 +40,7 @@ function shouldConserveTrumps(gamePhase, deckLength, trumpCardDrawn, difficulty 
   }
   
   const finalConservation = Math.max(0, Math.min(1, baseConservation + phaseModifier));
-  return finalConservation > 0.5;
+  return finalConservation > 0.4; // Lower threshold for conservation
 }
 
 // Count trump cards in hand
@@ -43,13 +48,26 @@ function countTrumpsInHand(hand, trumpSuit) {
   return hand.filter(card => isTrump(card, trumpSuit)).length;
 }
 
-// Adjust strategy based on trump count
-function adjustStrategyForTrumpCount(trumpCount, gamePhase) {
+// Adjust strategy based on trump count with enhanced logic
+function adjustStrategyForTrumpCount(trumpCount, gamePhase, deckLength) {
+  // More sophisticated trump count analysis
+  if (trumpCount >= 4 && (gamePhase === 'early' || gamePhase === 'mid')) {
+    return 'very_conservative'; // Save most trumps when we have many
+  }
   if (trumpCount >= 3 && gamePhase === 'early') {
-    return 'very_conservative'; // Save most trumps
+    return 'conservative'; // Be conservative with 3+ trumps early
+  }
+  if (trumpCount >= 2 && (gamePhase === 'critical' || gamePhase === 'endgame')) {
+    return 'aggressive'; // Use trumps when deck is low
+  }
+  if (trumpCount <= 2 && (gamePhase === 'critical' || gamePhase === 'endgame')) {
+    return 'aggressive'; // Use remaining trumps in endgame
+  }
+  if (trumpCount <= 1 && deckLength < 8) {
+    return 'desperate'; // Use any trump available when deck is very low
   }
   if (trumpCount <= 1 && gamePhase === 'late') {
-    return 'aggressive'; // Use remaining trumps
+    return 'aggressive'; // Use remaining trumps in late game
   }
   return 'balanced';
 }
@@ -71,19 +89,32 @@ function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve,
       // Scale penalties based on difficulty level
       const penaltyMultiplier = safeDifficulty.trumpConservation || 0.5;
       
-      if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
-        strategicValue += 50 * penaltyMultiplier; // High-value trumps get penalty
+      if (isJoker(card)) {
+        strategicValue += 80 * penaltyMultiplier; // Jokers are most valuable
+      } else if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
+        strategicValue += 60 * penaltyMultiplier; // High-value trumps get strong penalty
       } else if (card.rank === 'K' || card.rank === 'Q' || card.rank === 'J') {
-        strategicValue += 20 * penaltyMultiplier; // Medium-value trumps get smaller penalty
+        strategicValue += 30 * penaltyMultiplier; // Medium-value trumps get moderate penalty
+      } else {
+        strategicValue += 10 * penaltyMultiplier; // Low-value trumps get small penalty
       }
-      // Low-value trumps (7, 8, 9, 10) get no penalty - can be used freely
+      
+      // Extra protection in critical/endgame phases
+      if (gamePhase === 'critical' || gamePhase === 'endgame') {
+        if (isJoker(card)) strategicValue += 40;
+        else if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
+          strategicValue += 30;
+        }
+      }
     }
     
-    // Adjust based on trump count in hand
-    const strategy = adjustStrategyForTrumpCount(trumpCount, gamePhase);
+    // Adjust based on trump count in hand with enhanced logic
+    const strategy = adjustStrategyForTrumpCount(trumpCount, gamePhase, context.deckLength);
     if (strategy === 'very_conservative') {
       // Even in very conservative mode, allow low-value trumps
-      if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
+      if (isJoker(card)) {
+        strategicValue += 50 * (safeDifficulty.trumpConservation || 0.5);
+      } else if (card.rank === 'A' || card.rank === '2' || card.rank === '3') {
         strategicValue += 40 * (safeDifficulty.trumpConservation || 0.5);
       } else if (card.rank === 'K' || card.rank === 'Q' || card.rank === 'J') {
         strategicValue += 15 * (safeDifficulty.trumpConservation || 0.5);
@@ -91,17 +122,25 @@ function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve,
       // Low-value trumps still get no penalty
     } else if (strategy === 'aggressive') {
       strategicValue -= 20 * (1 - (safeDifficulty.trumpConservation || 0.5));
+    } else if (strategy === 'desperate') {
+      // When desperate, use any trump available
+      strategicValue -= 40 * (1 - (safeDifficulty.trumpConservation || 0.5));
     }
     
-    // Context-aware trump usage
+    // Context-aware trump usage with enhanced endgame logic
     if (context.forceOpponentPickup && context.pileSize > 3) {
       // If we can force opponent to pick up a large pile, be more aggressive with trumps
       strategicValue -= 30 * (1 - (safeDifficulty.trumpConservation || 0.5));
     }
     
-    if (context.endgamePressure && context.deckLength < 5) {
-      // In endgame, use trumps more aggressively
+    if (context.endgamePressure && context.deckLength < 8) {
+      // In endgame, use trumps more aggressively - earlier trigger
       strategicValue -= 25 * (1 - (safeDifficulty.trumpConservation || 0.5));
+    }
+    
+    if (context.deckExhausted) {
+      // When deck is exhausted, be very aggressive with trumps and jokers
+      strategicValue -= 50 * (1 - (safeDifficulty.trumpConservation || 0.5));
     }
     
     if (context.opponentWeakness && context.opponentTrumpsPlayed > 1) {
@@ -110,7 +149,7 @@ function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve,
     }
   }
   
-  // Enhanced joker strategy
+  // Enhanced joker strategy with deck exhaustion logic
   if (isJoker(card)) {
     let jokerValue = shouldConserve ? 100 : 50;
     
@@ -135,6 +174,16 @@ function calculateStrategicCardValue(card, trumpSuit, gamePhase, shouldConserve,
     // Use jokers when opponent is likely to have strong cards
     if (context.opponentStrongHand) {
       jokerValue -= 25; // Use jokers to counter strong opponent hands
+    }
+    
+    // When deck is exhausted, be very aggressive with jokers
+    if (context.deckExhausted) {
+      jokerValue -= 40; // Use jokers aggressively when deck is empty
+    }
+    
+    // In endgame phases, be more willing to use jokers
+    if (gamePhase === 'critical' || gamePhase === 'endgame') {
+      jokerValue -= 20;
     }
     
     strategicValue += jokerValue * (safeDifficulty.trumpConservation || 0.5);
@@ -418,8 +467,8 @@ function predictOpponentHand(opponentInfo, trumpSuit, difficulty) {
   };
 }
 
-// Build strategic context for decision making
-function buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSuit, gamePhase) {
+// Build strategic context for decision making with enhanced endgame indicators
+function buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSuit, gamePhase, trumpCardDrawn) {
   const context = {
     leadCard,
     pileSize: pile ? pile.length : 0,
@@ -430,7 +479,12 @@ function buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSu
     opponentWeakness: false,
     criticalMoment: false,
     opponentStrongHand: false,
-    opponentTrumpsPlayed: opponentInfo.trumpCardsPlayed || 0
+    opponentTrumpsPlayed: opponentInfo.trumpCardsPlayed || 0,
+    // New endgame indicators
+    isEndgame: deckLength < 8,
+    isCritical: deckLength < 5,
+    trumpCardAvailable: !trumpCardDrawn,
+    deckExhausted: deckLength === 0
   };
   
   // Determine if we can force opponent pickup
@@ -438,8 +492,8 @@ function buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSu
     context.forceOpponentPickup = true;
   }
   
-  // Endgame pressure
-  if (deckLength < 5) {
+  // Enhanced endgame pressure detection
+  if (deckLength < 8) {
     context.endgamePressure = true;
   }
   
@@ -525,7 +579,7 @@ export function chooseBotResponse(leadCard, hand, trumpSuit, trumpCardDrawn = tr
   const opponentPrediction = predictOpponentHand(opponentInfo, trumpSuit, safeDifficulty);
   
   // Build strategic context
-  const context = buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSuit, gamePhase);
+  const context = buildStrategicContext(leadCard, pile, deckLength, opponentInfo, trumpSuit, gamePhase, trumpCardDrawn);
   
   // When responding to a card, be less conservative to avoid picking up
   const isResponding = leadCard !== null;

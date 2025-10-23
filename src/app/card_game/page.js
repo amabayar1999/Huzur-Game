@@ -420,21 +420,6 @@ function CardGameInner() {
           <div className="flex flex-col items-center gap-2 sm:gap-3">
             {/* Essential Info - Horizontal Layout */}
             <div className="flex items-center gap-1 sm:gap-2 lg:gap-4 flex-wrap justify-center">
-              {/* Trump Suit */}
-              <div className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1 sm:py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
-                <div className="text-xs sm:text-sm font-semibold text-yellow-800">🃏 Trump:</div>
-                <div className="relative">
-                  <Card
-                    card={{ rank: 'A', suit: state.trumpSuit }}
-                    trumpSuit={state.trumpSuit}
-                    size="small"
-                    className="border-yellow-400"
-                    hideCenterSuit={true}
-                  />
-                </div>
-                <div className="text-xs sm:text-sm text-yellow-600">{state.trumpSuit}</div>
-              </div>
-
               {/* Deck */}
               <div className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1 sm:py-2 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="text-xs sm:text-sm font-semibold text-blue-800">🃏 Deck:</div>
@@ -466,25 +451,29 @@ function CardGameInner() {
                 )}
               </div>
 
-              {/* Under Deck Card - Compact */}
+              {/* Under Deck Card - Enhanced */}
               <div className="flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1 sm:py-2 bg-gray-50 border border-gray-200 rounded-lg">
                 <div className="text-xs sm:text-sm font-semibold text-gray-700">📋 Under:</div>
                 {state.trumpCard ? (
-                  <Card
-                    card={state.trumpCard}
-                    trumpSuit={state.trumpSuit}
-                    size="small"
-                    className="border-gray-400"
-                    hideCenterSuit={true}
-                  />
+                  <div className="relative">
+                    <Card
+                      card={state.trumpCard}
+                      trumpSuit={state.trumpSuit}
+                      size="small"
+                      className="border-gray-400"
+                      hideCenterSuit={true}
+                    />
+                    {state.trumpCardDrawn && (
+                      <div className="absolute -top-1 -right-1 bg-green-500 text-white text-xs rounded-full w-3 h-3 sm:w-4 sm:h-4 flex items-center justify-center font-bold">
+                        ✓
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <div className="w-5 h-6 sm:w-6 sm:h-8 bg-gray-200 rounded border border-dashed border-gray-400 flex items-center justify-center">
                     <span className="text-gray-400 text-xs">?</span>
                   </div>
                 )}
-                <div className="text-xs text-gray-600">
-                  {state.trumpCardDrawn ? 'Drawn' : 'Available'}
-                </div>
               </div>
 
             </div>

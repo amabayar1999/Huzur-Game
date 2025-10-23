@@ -107,7 +107,7 @@ export default function Card({
                       <div className={`joker-text ${cardText.color}`}>JOKER</div>
                     </div>
                   ) : (
-                    <div className={`center-suit ${cardText.color} ${hideCenterSuit ? 'center-suit-minimal' : ''}`}>
+                    <div className={`center-suit ${cardText.color}`}>
                       {cardText.centerText}
                     </div>
                   )}
