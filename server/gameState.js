@@ -1,75 +1,175 @@
-// Import Huzur game logic (we'll need to adapt this for server-side)
-// For now, we'll create a server-compatible version
+// Authoritative Game State - Single Source of Truth
+const { canPlayCard, canPlayCombo, isCombo, canBeat, mustFollowSuit, isTrump, canBeatComboByPosition, determineTrickWinner } = require('./gameLogic');
+const { logger } = require('./logger');
 
 class GameState {
-  constructor() {
+  constructor(roomId) {
+    this.roomId = roomId;
     this.players = [];
-    this.gameStarted = false;
+    this.roomOwner = null;
+    this.started = false;
     this.currentPlayer = null;
+    this.leadPlayer = null;
     this.leadCard = null;
     this.pile = [];
     this.deck = [];
     this.trumpSuit = null;
     this.trumpCard = null;
     this.trumpCardDrawn = false;
-    this.playerHands = {}; // playerId -> cards[]
+    this.playerHands = {};
     this.deadPile = [];
     this.winner = null;
     this.log = [];
     this.lastPlay = {};
     this.createdAt = new Date();
+    
+    // ✅ Log management - prevent unbounded growth
+    this.MAX_LOG_SIZE = 100; // Keep only last 100 entries
+    this.fullLog = []; // Complete log for debugging
+    
+    // Anti-cheat measures
+    this.playerActions = {}; // Track player actions for rate limiting
+    this.suspiciousActivity = {}; // Track suspicious behavior
+    
+    // Game statistics
+    this.gameStats = {
+      totalTricks: 0,
+      tricksWon: {},
+      cardsPlayed: {},
+      combosPlayed: {},
+      jokersPlayed: {},
+      trumpCardsPlayed: {},
+      pilePickups: {},
+      gameStartTime: null,
+      gameEndTime: null,
+      totalGameTime: 0
+    };
   }
 
+  // ✅ Add log entry with automatic pagination
+  addLog(message) {
+    const timestamp = new Date().toISOString();
+    const logEntry = `[${timestamp}] ${message}`;
+    
+    // Add to full log for debugging
+    this.fullLog.push(logEntry);
+    
+    // Add to display log with pagination
+    this.log.push(logEntry);
+    
+    // Keep only last MAX_LOG_SIZE entries in display log
+    if (this.log.length > this.MAX_LOG_SIZE) {
+      this.log.shift(); // Remove oldest entry
+    }
+  }
+  
+  // Get full log for debugging (not sent to clients)
+  getFullLog() {
+    return this.fullLog;
+  }
+
+  // Check if player is in the game
+  hasPlayer(playerId) {
+    return this.players.includes(playerId);
+  }
+
+  // Add player to game
   addPlayer(playerId) {
     if (!this.players.includes(playerId)) {
       this.players.push(playerId);
       this.playerHands[playerId] = [];
       
-      // Set first player as current player if game hasn't started
-      if (!this.currentPlayer && this.players.length === 1) {
+      // Set room owner if first player
+      if (!this.roomOwner) {
+        this.roomOwner = playerId;
+      }
+      
+      // Set current player if first player
+      if (!this.currentPlayer) {
         this.currentPlayer = playerId;
       }
     }
   }
 
+  // Remove player from game
   removePlayer(playerId) {
     this.players = this.players.filter(p => p !== playerId);
     delete this.playerHands[playerId];
     
-    // If removed player was current player, move to next player
+    // ✅ Clean up anti-cheat tracking to prevent memory leaks
+    delete this.playerActions[playerId];
+    delete this.suspiciousActivity[playerId];
+    
+    // ✅ Clean up game statistics
+    if (this.gameStats.tricksWon) delete this.gameStats.tricksWon[playerId];
+    if (this.gameStats.cardsPlayed) delete this.gameStats.cardsPlayed[playerId];
+    if (this.gameStats.combosPlayed) delete this.gameStats.combosPlayed[playerId];
+    if (this.gameStats.jokersPlayed) delete this.gameStats.jokersPlayed[playerId];
+    if (this.gameStats.trumpCardsPlayed) delete this.gameStats.trumpCardsPlayed[playerId];
+    if (this.gameStats.pilePickups) delete this.gameStats.pilePickups[playerId];
+    
+    // ✅ Clean up last play data
+    delete this.lastPlay[playerId];
+    
+    // If removed player was current player, move to next
     if (this.currentPlayer === playerId) {
-      this.currentPlayer = this.players[0] || null;
+      this.nextTurn();
     }
     
     // If no players left, reset game
     if (this.players.length === 0) {
-      this.gameStarted = false;
+      this.started = false;
       this.currentPlayer = null;
       this.leadCard = null;
       this.pile = [];
       this.winner = null;
+      
+      // ✅ Clean up all tracking objects
+      this.playerActions = {};
+      this.suspiciousActivity = {};
+      this.lastPlay = {};
     }
   }
 
+  // Start the game - ONLY server can do this
   startGame() {
     if (this.players.length < 2) {
       return { success: false, error: "Need at least 2 players to start" };
     }
     
-    this.gameStarted = true;
-    this.currentPlayer = this.players[0];
+    if (this.started) {
+      return { success: true, info: "Game already started" }; // ✅ changed
+    }
     
-    // Initialize Huzur game
+    this.started = true;
+    this.currentPlayer = this.players[0];
+    this.initializeGameStats();
     this.initializeHuzurGame();
     
-    this.log.push(`Game started with ${this.players.length} players`);
+    this.addLog(`Game started with ${this.players.length} players`);
+    this.addLog(`Cards dealt to all players`);
     
-    return { success: true, gameState: this.getState() };
+    return { success: true };
+  }
+
+  // Initialize game statistics
+  initializeGameStats() {
+    this.gameStats.gameStartTime = new Date();
+    this.gameStats.totalTricks = 0;
+    
+    for (const playerId of this.players) {
+      this.gameStats.tricksWon[playerId] = 0;
+      this.gameStats.cardsPlayed[playerId] = 0;
+      this.gameStats.combosPlayed[playerId] = 0;
+      this.gameStats.jokersPlayed[playerId] = 0;
+      this.gameStats.trumpCardsPlayed[playerId] = 0;
+      this.gameStats.pilePickups[playerId] = 0;
+    }
   }
 
   // Initialize Huzur game with proper deck and card dealing
   initializeHuzurGame() {
-    // Create a standard 54-card deck (52 + 2 jokers)
+    // Create and shuffle deck
     this.deck = this.createDeck();
     this.shuffleDeck();
     
@@ -81,11 +181,11 @@ class GameState {
     // Deal 5 cards to each player
     this.dealCards();
     
-    this.log.push(`Trump is ${this.trumpSuit} from ${this.formatCard(this.trumpCard)}`);
-    this.log.push(`5-card combos will be unlocked when the trump card is drawn!`);
+    this.addLog(`Trump is ${this.trumpSuit} from ${this.formatCard(this.trumpCard)}`);
+    this.addLog(`5-card combos will be unlocked when the trump card is drawn!`);
   }
 
-  // Create standard deck
+  // Create standard 54-card deck
   createDeck() {
     const suits = ['H', 'S', 'D', 'C'];
     const ranks = ['7', '8', '9', '10', 'J', 'Q', 'K', '3', '2', 'A'];
@@ -119,52 +219,34 @@ class GameState {
     return card.suit;
   }
 
-  // Deal cards to players
+  // Deal cards to all players
   dealCards() {
     const cardsPerPlayer = 5;
+    
+    // Initialize empty hands for all players
+    for (const playerId of this.players) {
+      this.playerHands[playerId] = [];
+    }
     
     for (let i = 0; i < cardsPerPlayer; i++) {
       for (const playerId of this.players) {
         if (this.deck.length > 0) {
-          this.playerHands[playerId].push(this.deck.pop());
+          const card = this.deck.pop();
+          this.playerHands[playerId].push(card);
         }
       }
     }
   }
 
-  // Format card for display
-  formatCard(card) {
-    if (!card) return '';
-    if (card.rank === 'BJ') return 'Joker♣♠';
-    if (card.rank === 'RJ') return 'Joker♥♦';
-    const suitIcon = this.getSuitIcon(card.suit);
-    return `${card.rank}${suitIcon}`;
-  }
-
-  // Get suit icon
-  getSuitIcon(suit) {
-    switch (suit) {
-      case 'H': return '♥';
-      case 'S': return '♠';
-      case 'D': return '♦';
-      case 'C': return '♣';
-      default: return '';
-    }
-  }
-
+  // Play a card - ONLY server validates
   playCard(playerId, card) {
-    if (!this.gameStarted) {
-      return { success: false, error: "Game not started" };
-    }
-    
-    if (this.currentPlayer !== playerId) {
-      return { success: false, error: "Not your turn" };
+    // Comprehensive validation before any move processing
+    const validationResult = this.validateMove(playerId, card);
+    if (!validationResult.success) {
+      return validationResult;
     }
     
     const playerHand = this.playerHands[playerId];
-    if (!playerHand) {
-      return { success: false, error: "Player not found" };
-    }
 
     // Handle single card
     if (!Array.isArray(card)) {
@@ -179,16 +261,134 @@ class GameState {
     return { success: false, error: "Invalid card format" };
   }
 
+  // Comprehensive move validation
+  validateMove(playerId, card) {
+    // 1. Game state validation
+    if (!this.started) {
+      return { success: false, error: "Game not started" };
+    }
+    
+    if (this.winner) {
+      return { success: false, error: "Game is already finished" };
+    }
+    
+    // 2. Player validation
+    if (!this.players.includes(playerId)) {
+      return { success: false, error: "Player not in game" };
+    }
+    
+    if (this.currentPlayer !== playerId) {
+      return { success: false, error: "Not your turn" };
+    }
+    
+    const playerHand = this.playerHands[playerId];
+    if (!playerHand || playerHand.length === 0) {
+      return { success: false, error: "Player has no cards" };
+    }
+
+    // ✅ 3. Rate limiting and anti-cheat validation (improved robustness)
+    const now = Date.now();
+    
+    // Initialize tracking if needed
+    if (!this.playerActions[playerId]) {
+      this.playerActions[playerId] = [];
+    }
+    if (!this.suspiciousActivity[playerId]) {
+      this.suspiciousActivity[playerId] = 0;
+    }
+    
+    // Clean up old actions (older than 1 second) in a single atomic-like operation
+    const recentActions = this.playerActions[playerId].filter(
+      actionTime => now - actionTime < 1000
+    );
+    
+    // ✅ Check rate limit BEFORE updating state (prevent partial updates on rejection)
+    if (recentActions.length >= 3) {
+      // Increment suspicious activity counter
+      this.suspiciousActivity[playerId]++;
+      logger.logRateLimitViolation(playerId, recentActions.length);
+      
+      // Ban after too many violations
+      if (this.suspiciousActivity[playerId] > 5) {
+        logger.logSuspiciousActivity(playerId, 'RATE_LIMIT_EXCEEDED', {
+          violations: this.suspiciousActivity[playerId],
+          roomId: this.roomId
+        });
+        return { success: false, error: "Suspicious activity detected - too many rapid actions" };
+      }
+      
+      return { success: false, error: "Please slow down - too many actions" };
+    }
+    
+    // ✅ Only update state after all checks pass (atomic-like operation)
+    recentActions.push(now);
+    this.playerActions[playerId] = recentActions;
+
+    // 4. Card format validation
+    if (!card) {
+      return { success: false, error: "No card provided" };
+    }
+
+    // 5. Card ownership validation
+    if (Array.isArray(card)) {
+      // Combo validation
+      if (card.length !== 3 && card.length !== 5) {
+        return { success: false, error: "Invalid combo size - must be 3 or 5 cards" };
+      }
+      
+      // Check for duplicate cards in combo
+      const cardCounts = {};
+      for (const comboCard of card) {
+        const cardKey = `${comboCard.rank}-${comboCard.suit}`;
+        cardCounts[cardKey] = (cardCounts[cardKey] || 0) + 1;
+        if (cardCounts[cardKey] > 1) {
+          return { success: false, error: "Duplicate cards in combo" };
+        }
+      }
+      
+      // Check if all cards in combo are in player's hand
+      for (const comboCard of card) {
+        const cardInHand = playerHand.find(c => 
+          c.rank === comboCard.rank && c.suit === comboCard.suit
+        );
+        if (!cardInHand) {
+          return { success: false, error: "Card not in hand" };
+        }
+      }
+      
+      // Validate combo structure
+      if (!isCombo(card)) {
+        return { success: false, error: "Invalid combo structure" };
+      }
+      
+      // Validate combo play according to game rules
+      if (!canPlayCombo(this.leadCard, card, playerHand, this.trumpSuit)) {
+        return { success: false, error: "Invalid combo play according to game rules" };
+      }
+    } else {
+      // Single card validation
+      const cardInHand = playerHand.find(c => 
+        c.rank === card.rank && c.suit === card.suit
+      );
+      if (!cardInHand) {
+        return { success: false, error: "Card not in hand" };
+      }
+      
+      // Validate single card play according to game rules
+      if (!canPlayCard(this.leadCard, card, playerHand, this.trumpSuit)) {
+        return { success: false, error: "Invalid play according to game rules" };
+      }
+    }
+
+    return { success: true };
+  }
+
   // Play a single card
   playSingleCard(playerId, card, playerHand) {
-    // Validate card is in hand
+    // Find card index (validation already done in validateMove)
     const cardIndex = playerHand.findIndex(c => 
       c.rank === card.rank && c.suit === card.suit
     );
-    
-    if (cardIndex === -1) {
-      return { success: false, error: "Card not in hand" };
-    }
 
     // Remove card from hand
     const newPlayerHand = [...playerHand];
@@ -199,8 +399,11 @@ class GameState {
     this.pile = [...this.pile, card];
     this.lastPlay = { ...this.lastPlay, [playerId]: card };
 
+    // Update game statistics
+    this.updatePlayStats(playerId, card);
+
     // Add to log
-    this.log.push(`${playerId} played ${this.formatCard(card)}`);
+    this.addLog(`${playerId} played ${this.formatCard(card)}`);
 
     // Check if this completes a trick
     if (this.leadCard) {
@@ -208,22 +411,20 @@ class GameState {
     } else {
       // Player is leading
       this.leadCard = card;
-      this.nextPlayer();
-      return { success: true, gameState: this.getState() };
+      this.leadPlayer = playerId;
+      this.nextTurn();
+      return { success: true };
     }
   }
 
   // Play a combo
   playCombo(playerId, combo, playerHand) {
-    // Validate all cards are in hand
+    // Find card indices (validation already done in validateMove)
     const cardIndices = [];
     for (const card of combo) {
       const index = playerHand.findIndex(c => 
         c.rank === card.rank && c.suit === card.suit
       );
-      if (index === -1) {
-        return { success: false, error: "Card not in hand" };
-      }
       cardIndices.push(index);
     }
 
@@ -238,8 +439,11 @@ class GameState {
     this.pile = [...this.pile, ...combo];
     this.lastPlay = { ...this.lastPlay, [playerId]: combo };
 
+    // Update game statistics for combo
+    this.updateComboStats(playerId, combo);
+
     // Add to log
-    this.log.push(`${playerId} played combo (${combo.length} cards)`);
+    this.addLog(`${playerId} played combo (${combo.length} cards)`);
 
     // Check if this completes a trick
     if (this.leadCard) {
@@ -247,63 +451,49 @@ class GameState {
     } else {
       // Player is leading
       this.leadCard = combo;
-      this.nextPlayer();
-      return { success: true, gameState: this.getState() };
+      this.leadPlayer = playerId;
+      this.nextTurn();
+      return { success: true };
     }
   }
 
   // Resolve a trick
   resolveTrick(respondingPlayerId, responseCard) {
     const leadCard = this.leadCard;
-    const leadPlayerId = this.currentPlayer;
+    const leadPlayerId = this.leadPlayer;
     
-    // Determine winner (simplified logic for now)
-    const responseWins = this.determineTrickWinner(leadCard, responseCard);
+    // Determine winner using proper game logic
+    const responseWins = determineTrickWinner(leadCard, responseCard, this.trumpSuit);
     const winnerId = responseWins ? respondingPlayerId : leadPlayerId;
 
-    // Move cards to dead pile
+    // Move all trick cards to dead pile
     this.deadPile = [...this.deadPile, ...this.pile];
     this.pile = [];
     this.leadCard = null;
+    this.leadPlayer = null;
 
     // Update current player to winner
     this.currentPlayer = winnerId;
+
+    // Update trick statistics
+    this.gameStats.totalTricks++;
+    this.gameStats.tricksWon[winnerId]++;
 
     // Check for win condition
     const winner = this.checkWinCondition();
     if (winner) {
       this.winner = winner;
-      this.log.push(`🎉 ${winner} wins the game!`);
+      this.gameStats.gameEndTime = new Date();
+      this.gameStats.totalGameTime = this.gameStats.gameEndTime - this.gameStats.gameStartTime;
+      this.addLog(`🎉 ${winner} wins the game!`);
     } else {
       // Draw cards to maintain hand size
       this.drawCardsToHandSize();
     }
 
-    this.log.push(`${winnerId} won the trick`);
+    this.addLog(`${winnerId} won the trick`);
 
-    return { success: true, gameState: this.getState() };
-  }
-
-  // Determine trick winner (simplified)
-  determineTrickWinner(leadCard, responseCard) {
-    // This is simplified - in a full implementation, you'd use your existing game logic
-    if (Array.isArray(leadCard) && Array.isArray(responseCard)) {
-      return responseCard.length >= leadCard.length;
-    } else if (!Array.isArray(leadCard) && !Array.isArray(responseCard)) {
-      return this.compareCards(leadCard, responseCard);
-    }
-    
-    return Array.isArray(responseCard);
-  }
-
-  // Compare cards (simplified)
-  compareCards(lead, response) {
-    // Simplified comparison - you'd use your existing canBeat logic
-    const rankOrder = ['7', '8', '9', '10', 'J', 'Q', 'K', '3', '2', 'A'];
-    const leadIndex = rankOrder.indexOf(lead.rank);
-    const responseIndex = rankOrder.indexOf(response.rank);
-    
-    return responseIndex > leadIndex;
+    return { success: true };
   }
 
   // Check win condition
@@ -329,23 +519,32 @@ class GameState {
         // Check if trump card was drawn
         if (drawnCard.rank === this.trumpCard.rank && drawnCard.suit === this.trumpCard.suit) {
           this.trumpCardDrawn = true;
-          this.log.push(`${playerId} drew ${this.formatCard(drawnCard)} - 5-card combos are now allowed!`);
+          this.addLog(`${playerId} drew ${this.formatCard(drawnCard)} - 5-card combos are now allowed!`);
         }
       }
     }
   }
 
-  // Move to next player
-  nextPlayer() {
-    const currentIndex = this.players.indexOf(this.currentPlayer);
-    const nextIndex = (currentIndex + 1) % this.players.length;
-    this.currentPlayer = this.players[nextIndex];
+  // Next turn after a valid play
+  nextTurn() {
+    const currentIdx = this.players.indexOf(this.currentPlayer);
+    const nextIdx = (currentIdx + 1) % this.players.length;
+    this.currentPlayer = this.players[nextIdx];
   }
 
   // Pick up pile
   pickupPile(playerId) {
-    if (!this.gameStarted) {
+    // Comprehensive validation for pickup
+    if (!this.started) {
       return { success: false, error: "Game not started" };
+    }
+
+    if (this.winner) {
+      return { success: false, error: "Game is already finished" };
+    }
+
+    if (!this.players.includes(playerId)) {
+      return { success: false, error: "Player not in game" };
     }
 
     if (this.currentPlayer !== playerId) {
@@ -356,52 +555,223 @@ class GameState {
       return { success: false, error: "No pile to pick up" };
     }
 
+    // Additional validation: can't pickup if you have no cards (shouldn't happen but safety check)
+    const playerHand = this.playerHands[playerId];
+    if (!playerHand || playerHand.length === 0) {
+      return { success: false, error: "Player has no cards to play" };
+    }
+
     // Add pile to player's hand
-    const newHand = [...this.playerHands[playerId], ...this.pile];
+    const pileCards = [...this.pile];
+    const newHand = [...this.playerHands[playerId], ...pileCards];
     this.playerHands[playerId] = newHand;
     this.pile = [];
     this.leadCard = null;
+    this.leadPlayer = null;
 
-    this.log.push(`${playerId} picked up ${this.pile.length} cards`);
+    // Update pickup statistics
+    this.gameStats.pilePickups[playerId]++;
+
+    this.addLog(`${playerId} picked up ${pileCards.length} cards`);
 
     // Move to next player
-    this.nextPlayer();
+    this.nextTurn();
 
-    return { success: true, gameState: this.getState() };
+    return { success: true };
   }
 
+  // Update statistics for single card play
+  updatePlayStats(playerId, card) {
+    this.gameStats.cardsPlayed[playerId]++;
+    
+    // Check if it's a joker
+    if (card.rank === 'BJ' || card.rank === 'RJ') {
+      this.gameStats.jokersPlayed[playerId]++;
+    }
+    
+    // Check if it's a trump card
+    if (isTrump(card, this.trumpSuit)) {
+      this.gameStats.trumpCardsPlayed[playerId]++;
+    }
+  }
+
+  // Update statistics for combo play
+  updateComboStats(playerId, combo) {
+    this.gameStats.combosPlayed[playerId]++;
+    this.gameStats.cardsPlayed[playerId] += combo.length;
+    
+    // Count jokers and trump cards in combo
+    combo.forEach(card => {
+      if (card.rank === 'BJ' || card.rank === 'RJ') {
+        this.gameStats.jokersPlayed[playerId]++;
+      }
+      if (isTrump(card, this.trumpSuit)) {
+        this.gameStats.trumpCardsPlayed[playerId]++;
+      }
+    });
+  }
+
+  // Get player data for UI helpers
+  getPlayerData() {
+    const playerData = {};
+    for (const playerId of this.players) {
+      playerData[playerId] = {
+        handSize: this.playerHands[playerId]?.length || 0,
+        tricksWon: this.gameStats.tricksWon[playerId] || 0,
+        cardsPlayed: this.gameStats.cardsPlayed[playerId] || 0,
+        combosPlayed: this.gameStats.combosPlayed[playerId] || 0,
+        pilePickups: this.gameStats.pilePickups[playerId] || 0,
+        isCurrentPlayer: this.currentPlayer === playerId,
+        isRoomOwner: this.roomOwner === playerId
+      };
+    }
+    return playerData;
+  }
+
+  // Get comprehensive game statistics
+  getGameStats() {
+    return {
+      ...this.gameStats,
+      averageTricksPerPlayer: this.gameStats.totalTricks / this.players.length,
+      mostTricksWon: Math.max(...Object.values(this.gameStats.tricksWon)),
+      mostCardsPlayed: Math.max(...Object.values(this.gameStats.cardsPlayed)),
+      mostCombosPlayed: Math.max(...Object.values(this.gameStats.combosPlayed)),
+      totalJokersPlayed: Object.values(this.gameStats.jokersPlayed).reduce((a, b) => a + b, 0),
+      totalTrumpCardsPlayed: Object.values(this.gameStats.trumpCardsPlayed).reduce((a, b) => a + b, 0),
+      totalPilePickups: Object.values(this.gameStats.pilePickups).reduce((a, b) => a + b, 0)
+    };
+  }
+
+  // Format card for display
+  formatCard(card) {
+    if (!card) return '';
+    if (card.rank === 'BJ') return 'Joker♣♠';
+    if (card.rank === 'RJ') return 'Joker♥♦';
+    const suitIcon = this.getSuitIcon(card.suit);
+    return `${card.rank}${suitIcon}`;
+  }
+
+  // Get suit icon
+  getSuitIcon(suit) {
+    switch (suit) {
+      case 'H': return '♥';
+      case 'S': return '♠';
+      case 'D': return '♦';
+      case 'C': return '♣';
+      default: return '';
+    }
+  }
+
+  // Get the authoritative game state - SINGLE SOURCE OF TRUTH
   getState() {
     return {
-      players: this.players,
-      gameStarted: this.gameStarted,
+      // --- Core metadata ---
+      roomId: this.roomId,
+      roomOwner: this.roomOwner,
+      createdAt: this.createdAt,
+      updatedAt: new Date(),
+
+      // --- Game flow ---
+      started: this.started,
       currentPlayer: this.currentPlayer,
+      winner: this.winner,
+
+      // --- Players & cards ---
+      players: this.players.map(id => ({
+        id,
+        cardCount: this.playerHands[id]?.length || 0
+      })),
+      playerData: this.getPlayerData(),
+      deckCount: this.deck.length,
+      discardCount: this.deadPile.length,
+
+      // --- Game state ---
+      leadPlayer: this.leadPlayer,
       leadCard: this.leadCard,
       pile: this.pile,
-      deck: this.deck,
       trumpSuit: this.trumpSuit,
       trumpCard: this.trumpCard,
       trumpCardDrawn: this.trumpCardDrawn,
-      playerHands: this.playerHands,
-      deadPile: this.deadPile,
-      winner: this.winner,
-      log: this.log,
       lastPlay: this.lastPlay,
-      createdAt: this.createdAt
+
+      // --- UI helpers ---
+      playerCount: this.players.length,
+      gameStarted: this.started,     // 👈 alias for client backward-compatibility
+      canStart: !this.started && this.players.length >= 2,
+
+      // --- Logs / events ---
+      logs: this.log.slice(-20),    // send only recent logs
+      log: this.log,                // backward compatibility
+
+      // --- Game statistics ---
+      gameStats: this.getGameStats()
     };
   }
 
   // Get public state (without revealing other players' hands)
   getPublicState(playerId) {
     const state = this.getState();
-    const publicState = { ...state };
-    
-    // Only show current player's hand
-    publicState.playerHands = {};
-    if (this.playerHands[playerId]) {
-      publicState.playerHands[playerId] = this.playerHands[playerId];
+    return {
+      ...state,
+      playerHands: {
+        [playerId]: this.playerHands[playerId] || []
+      }
+    };
+  }
+
+  // Get player's private state (their hand only) - DEPRECATED, use getPublicState
+  getPlayerState(playerId) {
+    return this.getPublicState(playerId);
+  }
+
+  // Deal cards to a new player who joins an ongoing game
+  dealCardsToNewPlayer(playerId) {
+    if (!this.started) {
+      return { success: false, error: "Game not started" };
     }
-    
-    return publicState;
+
+    if (this.playerHands[playerId] && this.playerHands[playerId].length > 0) {
+      return { success: false, error: "Player already has cards" };
+    }
+
+    // Initialize empty hand
+    this.playerHands[playerId] = [];
+
+    // Deal 5 cards to the new player
+    const cardsToDeal = 5;
+    for (let i = 0; i < cardsToDeal && this.deck.length > 0; i++) {
+      const card = this.deck.pop();
+      this.playerHands[playerId].push(card);
+      
+      // Check if trump card was drawn
+      if (card.rank === this.trumpCard.rank && card.suit === this.trumpCard.suit) {
+        this.trumpCardDrawn = true;
+        this.addLog(`${playerId} drew ${this.formatCard(card)} - 5-card combos are now allowed!`);
+      }
+    }
+
+    this.addLog(`Cards dealt to new player ${playerId}`);
+    return { success: true };
+  }
+
+  // Force deal cards to all players (room owner only)
+  forceDealCards() {
+    if (!this.started) {
+      return { success: false, error: "Game not started" };
+    }
+
+    // Deal cards to all players who don't have cards
+    for (const playerId of this.players) {
+      if (!this.playerHands[playerId] || this.playerHands[playerId].length === 0) {
+        const result = this.dealCardsToNewPlayer(playerId);
+        if (!result.success) {
+          return result;
+        }
+      }
+    }
+
+    this.addLog(`Cards force-dealt to all players`);
+    return { success: true };
   }
 }
 

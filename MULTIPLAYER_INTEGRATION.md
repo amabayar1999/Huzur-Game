@@ -1,4 +1,4 @@
-# 🎮 Huzur Multiplayer Integration - Complete
+I# 🎮 Huzur Multiplayer Integration - Complete
 
 ## ✅ **Integration Status: COMPLETE**
 
@@ -51,7 +51,7 @@ Frontend runs on: `http://localhost:3000`
 1. Go to `http://localhost:3000`
 2. Click "🎮 Play Huzur (Multiplayer)"
 3. Create a room or join an existing one
-4. Wait for other players (2-4 players)
+4. Wait for another player (2 players total)
 5. Start the game and play!
 
 ## 🎯 **Game Flow**
@@ -60,7 +60,7 @@ Frontend runs on: `http://localhost:3000`
 1. **Create Room**: Players can create new rooms with custom IDs
 2. **Join Room**: Players can join existing rooms
 3. **Room List**: See all available rooms
-4. **Player Management**: 2-4 players per room
+4. **Player Management**: 2 players per room
 
 ### **Game Phase**
 1. **Game Start**: Deck is shuffled, trump card set, cards dealt
@@ -147,7 +147,7 @@ The integration has been tested with:
 - ✅ **Styling** and responsive design
 
 ### **New Features**
-- ✅ **Multiplayer lobby** and room management
+- ✅ **2-player multiplayer lobby** and room management
 - ✅ **Real-time game synchronization**
 - ✅ **Multiplayer game component** with full Huzur integration
 - ✅ **Server-side game state** management

@@ -8,23 +8,35 @@ import Lobby from '../../components/Lobby';
 function MultiplayerLobby() {
   const [socket, setSocket] = useState(null);
   const [connected, setConnected] = useState(false);
-  const [currentRoom, setCurrentRoom] = useState(null);
-  const [gameState, setGameState] = useState(null);
+  const [playerId, setPlayerId] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    // Initialize socket connection
+    // Generate or retrieve stable player ID
+    let userId = localStorage.getItem("uid");
+    if (!userId) {
+      userId = crypto.randomUUID();
+      localStorage.setItem("uid", userId);
+    }
+    
+    // Initialize socket connection to clean server
     const newSocket = io('http://localhost:4000', {
       autoConnect: true,
       reconnection: true,
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
+      timeout: 20000,
+      forceNew: true,
+      transports: ['polling', 'websocket'], // Start with polling, then upgrade to websocket
+      upgrade: true,
+      rememberUpgrade: false
     });
 
     // Connection events
     newSocket.on('connect', () => {
       console.log('🔌 Connected to server:', newSocket.id);
       setConnected(true);
+      setPlayerId(userId); // Use stable userId instead of socket.id
       setError(null);
     });
 
@@ -35,51 +47,28 @@ function MultiplayerLobby() {
 
     newSocket.on('connect_error', (err) => {
       console.error('❌ Connection error:', err);
-      setError('Failed to connect to server. Make sure the server is running on port 4000.');
+      console.error('❌ Error details:', {
+        message: err.message,
+        description: err.description,
+        context: err.context,
+        type: err.type
+      });
+      
+      if (err.message.includes('xhr poll error') || err.message.includes('polling')) {
+        setError('Network error: Please check your connection and try refreshing the page.');
+      } else if (err.message.includes('websocket')) {
+        setError('WebSocket connection failed. The server may be overloaded. Try refreshing the page.');
+      } else {
+        setError('Failed to connect to server. Make sure the server is running on port 4000.');
+      }
     });
 
-    // Room events
-    newSocket.on('room_created', (data) => {
-      console.log('🏠 Room created:', data);
-      setCurrentRoom(data.roomId);
-      setGameState(data.gameState);
-    });
-
-    newSocket.on('room_joined', (data) => {
-      console.log('👤 Joined room:', data);
-      setCurrentRoom(data.roomId);
-      setGameState(data.gameState);
-    });
-
-    newSocket.on('room_left', (data) => {
-      console.log('👋 Left room:', data);
-      setCurrentRoom(null);
-      setGameState(null);
-    });
-
-    newSocket.on('player_joined', (data) => {
-      console.log('👤 Player joined:', data);
-      setGameState(data.gameState);
-    });
-
-    newSocket.on('player_left', (data) => {
-      console.log('👋 Player left:', data);
-      setGameState(data.gameState);
-    });
-
-    newSocket.on('player_disconnected', (data) => {
-      console.log('🔌 Player disconnected:', data);
-      setGameState(data.gameState);
-    });
-
-    newSocket.on('game_started', (data) => {
-      console.log('🎮 Game started:', data);
-      setGameState(data);
-    });
-
+    // Error handling
     newSocket.on('error', (data) => {
       console.error('❌ Server error:', data);
-      setError(data.message);
+      if (data && data.message) {
+        setError(data.message);
+      }
     });
 
     setSocket(newSocket);
@@ -89,36 +78,6 @@ function MultiplayerLobby() {
       newSocket.close();
     };
   }, []);
-
-  const handleCreateRoom = (roomId) => {
-    if (socket && connected) {
-      socket.emit('create_room', { roomId });
-    }
-  };
-
-  const handleJoinRoom = (roomId) => {
-    if (socket && connected) {
-      socket.emit('join_room', { roomId });
-    }
-  };
-
-  const handleLeaveRoom = () => {
-    if (socket && connected) {
-      socket.emit('leave_room');
-    }
-  };
-
-  const handleStartGame = () => {
-    if (socket && connected) {
-      socket.emit('start_game');
-    }
-  };
-
-  const handleGetRooms = () => {
-    if (socket && connected) {
-      socket.emit('get_rooms');
-    }
-  };
 
   if (!connected && !error) {
     return (
@@ -185,14 +144,7 @@ function MultiplayerLobby() {
 
         <Lobby
           socket={socket}
-          connected={connected}
-          currentRoom={currentRoom}
-          gameState={gameState}
-          onCreateRoom={handleCreateRoom}
-          onJoinRoom={handleJoinRoom}
-          onLeaveRoom={handleLeaveRoom}
-          onStartGame={handleStartGame}
-          onGetRooms={handleGetRooms}
+          playerId={playerId}
         />
       </main>
     </div>
