@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from 'react';
-import { formatCard, suitToIcon, sortCardsForDisplay, isTrump } from '../lib/huzur/cards';
+import { useEffect, useState, useMemo } from 'react';
+import { formatCard, suitToIcon, sortCardsForDisplay, isTrump, isCombo } from '../lib/huzur/cards';
 import { COMBO_SIZES } from '../lib/huzur/constants';
 import Card from './Card';
 
@@ -14,9 +14,38 @@ export default function CleanMultiplayerGame({
   const [selectedIdx, setSelectedIdx] = useState(null);
   const [selectedCombo, setSelectedCombo] = useState([]);
   const [error, setError] = useState(null);
+  // ✅ FIX: Removed starting state - game should only be started from Lobby
 
-  // Get current player's hand from server state
-  const playerHand = gameState?.playerHands?.[playerId] || [];
+  // ✅ Fix: Use both playerHands[playerId] and hand property, with better null checking
+  const playerHand = useMemo(() => {
+    if (!gameState || !playerId) {
+      console.warn('⚠️ No gameState or playerId:', { gameState: !!gameState, playerId });
+      return [];
+    }
+    
+    // Try playerHands first (scoped by playerId)
+    if (gameState.playerHands && gameState.playerHands[playerId] !== undefined) {
+      const hand = gameState.playerHands[playerId];
+      console.log('✅ Found hand in playerHands:', { playerId, handLength: hand?.length });
+      return Array.isArray(hand) ? hand : [];
+    }
+    
+    // Fallback to hand property (direct from server)
+    if (gameState.hand !== undefined) {
+      const hand = gameState.hand;
+      console.log('✅ Found hand in hand property:', { handLength: hand?.length });
+      return Array.isArray(hand) ? hand : [];
+    }
+    
+    console.warn('⚠️ No hand found:', { 
+      playerId, 
+      playerHandsKeys: gameState.playerHands ? Object.keys(gameState.playerHands) : 'none',
+      hasHandProperty: 'hand' in gameState
+    });
+    
+    return [];
+  }, [gameState, playerId]);
+  
   const sortedHand = sortCardsForDisplay(playerHand, gameState?.trumpSuit);
 
   // Debug logging
@@ -46,6 +75,19 @@ export default function CleanMultiplayerGame({
   // Check if it's current player's turn
   const isMyTurn = gameState?.currentPlayer === playerId;
   const isGameStarted = gameState?.started || gameState?.gameStarted; // Use standardized property with fallback
+  const isRoomOwner = gameState?.roomOwner === playerId;
+  // ✅ FIX: Removed canStartGame - game should only be started from Lobby
+  // const canStartGame = gameState?.canStart && isRoomOwner && !isGameStarted;
+  
+  // Debug logging for game state
+  console.log('🎮 MultiplayerGame Debug:', {
+    gameState: gameState,
+    started: gameState?.started,
+    gameStarted: gameState?.gameStarted,
+    isGameStarted,
+    playerCount: gameState?.playerCount,
+    players: gameState?.players
+  });
 
   // Handle card selection for combos
   const handleCardClick = (idx) => {
@@ -141,18 +183,25 @@ export default function CleanMultiplayerGame({
   // Check if pickup is allowed (server will validate)
   const canPickup = gameState?.leadCard;
   
-  // Check if current selection is valid (simplified - let server validate)
+  // Check if current selection is valid
   const isValidPlay = () => {
+    // For combos, validate structure
     if (selectedCombo.length === COMBO_SIZES.SMALL || selectedCombo.length === COMBO_SIZES.LARGE) {
-      return selectedCombo.length > 0;
+      return isCombo(selectedCombo); // ✅ Validates combo structure (pair+1 for 3-card, 2 pairs for 5-card)
     }
+    // For single cards, just check if one is selected
     return selectedIdx != null;
   };
 
-  // Check if "Beat Combo" button should be enabled (simplified)
+  // Check if "Beat Combo" button should be enabled
   const canBeatComboNow = () => {
     if (!gameState?.leadCard || !Array.isArray(gameState.leadCard)) return false;
-    return selectedCombo.length === gameState.leadCard.length;
+    
+    // Must match size
+    if (selectedCombo.length !== gameState.leadCard.length) return false;
+    
+    // When beating a combo, just needs to match size (server validates beating logic)
+    return true;
   };
 
   // Get suit name for screen readers
@@ -211,61 +260,34 @@ export default function CleanMultiplayerGame({
           </div>
         </div>
         
-        {/* Start Game Button */}
-        {canStartGame && (
-          <div className="mb-4">
-            <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg mb-4">
-              <div className="text-green-400 font-semibold mb-2">✅ Ready to Start!</div>
-              <div className="text-sm text-gray-300">
-                You have 2 players and you're the room owner. Click below to begin the game.
+        {/* ✅ FIX: Removed start game button - game should only be started from Lobby */}
+        {/* Waiting States - Game page only shows waiting, never starts the game */}
+        <div className="p-4 rounded-lg">
+          {isRoomOwner ? (
+            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+              <div className="text-yellow-400 font-semibold mb-2">⏳ Waiting for Players</div>
+              <div className="text-sm text-gray-300 mb-3">
+                You need 1 more player to start the game. Please go back to the lobby to start the game once both players are ready.
+              </div>
+              <div className="text-xs text-gray-400 mb-2">
+                Room ID: <span className="font-mono bg-gray-700 px-2 py-1 rounded">{roomId}</span>
+              </div>
+              <div className="text-xs text-gray-400">
+                Note: Games can only be started from the lobby page.
               </div>
             </div>
-            <button
-              onClick={() => {
-                if (socket) {
-                  // ✅ Additional validation: Check if we actually have enough players
-                  if (!gameState?.canStart) {
-                    console.error('Cannot start game: Need at least 2 players');
-                    return;
-                  }
-                  
-                  socket.emit('start_game', { playerId }, (res) => {
-                    if (!res?.ok) {
-                      console.error('Failed to start game:', res?.error);
-                    }
-                  });
-                }
-              }}
-              className="px-6 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg"
-            >
-              🎮 Start Game
-            </button>
-          </div>
-        )}
-        
-        {/* Waiting States */}
-        {!canStartGame && (
-          <div className="p-4 rounded-lg">
-            {isRoomOwner ? (
-              <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
-                <div className="text-yellow-400 font-semibold mb-2">⏳ Waiting for Players</div>
-                <div className="text-sm text-gray-300 mb-3">
-                  You need 1 more player to start the game. Share the Room ID with a friend!
-                </div>
-                <div className="text-xs text-gray-400">
-                  Room ID: <span className="font-mono bg-gray-700 px-2 py-1 rounded">{roomId}</span>
-                </div>
+          ) : (
+            <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg">
+              <div className="text-blue-400 font-semibold mb-2">⏳ Waiting for Room Owner</div>
+              <div className="text-sm text-gray-300">
+                The room owner will start the game once ready. You'll be notified when it begins.
               </div>
-            ) : (
-              <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg">
-                <div className="text-blue-400 font-semibold mb-2">⏳ Waiting for Room Owner</div>
-                <div className="text-sm text-gray-300">
-                  The room owner will start the game once ready. You'll be notified when it begins.
-                </div>
+              <div className="text-xs text-gray-400 mt-2">
+                Note: Games can only be started from the lobby page.
               </div>
-            )}
-          </div>
-        )}
+            </div>
+          )}
+        </div>
       </div>
     );
   }

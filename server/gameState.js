@@ -4,6 +4,12 @@ const { logger } = require('./logger');
 
 class GameState {
   constructor(roomId) {
+    // ✅ Optional safeguard: prevent duplicate GameState instances
+    if (global.__existingRoomStates?.has(roomId)) {
+      console.log(`🚫 Duplicate GameState creation blocked for ${roomId} - reusing existing instance`);
+      return global.__existingRoomStates.get(roomId);
+    }
+    
     this.roomId = roomId;
     this.players = [];
     this.roomOwner = null;
@@ -23,6 +29,9 @@ class GameState {
     this.lastPlay = {};
     this.createdAt = new Date();
     
+    // Transient flag to prevent concurrent starts
+    this.starting = false;
+    
     // ✅ Log management - prevent unbounded growth
     this.MAX_LOG_SIZE = 100; // Keep only last 100 entries
     this.fullLog = []; // Complete log for debugging
@@ -30,6 +39,9 @@ class GameState {
     // Anti-cheat measures
     this.playerActions = {}; // Track player actions for rate limiting
     this.suspiciousActivity = {}; // Track suspicious behavior
+    
+    // Connection tracking
+    this.disconnectedPlayers = {}; // Track which players are offline (but still in game)
     
     // Game statistics
     this.gameStats = {
@@ -44,6 +56,10 @@ class GameState {
       gameEndTime: null,
       totalGameTime: 0
     };
+    
+    // ✅ Store instance in global registry to prevent duplicates
+    global.__existingRoomStates = global.__existingRoomStates || new Map();
+    global.__existingRoomStates.set(roomId, this);
   }
 
   // ✅ Add log entry with automatic pagination
@@ -77,7 +93,11 @@ class GameState {
   addPlayer(playerId) {
     if (!this.players.includes(playerId)) {
       this.players.push(playerId);
-      this.playerHands[playerId] = [];
+      // ✅ FIX: Only initialize empty hand if game hasn't started or player doesn't have cards yet
+      // This prevents overwriting existing hands when a player reconnects
+      if (!this.playerHands[playerId]) {
+        this.playerHands[playerId] = [];
+      }
       
       // Set room owner if first player
       if (!this.roomOwner) {
@@ -116,18 +136,10 @@ class GameState {
       this.nextTurn();
     }
     
-    // If no players left, reset game
+    // If no players left, keep game state intact for reconnection.
+    // Room-level cleanup/archival is handled by the server after a grace period.
     if (this.players.length === 0) {
-      this.started = false;
-      this.currentPlayer = null;
-      this.leadCard = null;
-      this.pile = [];
-      this.winner = null;
-      
-      // ✅ Clean up all tracking objects
-      this.playerActions = {};
-      this.suspiciousActivity = {};
-      this.lastPlay = {};
+      // Intentionally no hard reset here to avoid unintended re-starts.
     }
   }
 
@@ -137,10 +149,15 @@ class GameState {
       return { success: false, error: "Need at least 2 players to start" };
     }
     
-    if (this.started) {
-      return { success: true, info: "Game already started" }; // ✅ changed
+    // Strong idempotency: if already started or cards already dealt, do nothing
+    // Note: this.starting is checked at handler level, not here
+    if (this.started || this.playersDealt()) {
+      this.addLog("⚠️ Attempted to start twice – ignored");
+      return { success: true, info: "Game already started" };
     }
     
+    // this.starting is set by handler before calling this method
+    // this.started will be set here to mark game as started
     this.started = true;
     this.currentPlayer = this.players[0];
     this.initializeGameStats();
@@ -149,6 +166,7 @@ class GameState {
     this.addLog(`Game started with ${this.players.length} players`);
     this.addLog(`Cards dealt to all players`);
     
+    // Note: this.starting is cleared by handler after broadcast
     return { success: true };
   }
 
@@ -169,6 +187,10 @@ class GameState {
 
   // Initialize Huzur game with proper deck and card dealing
   initializeHuzurGame() {
+    // Guard against double-initialization
+    if (this.playersDealt()) {
+      return;
+    }
     // Create and shuffle deck
     this.deck = this.createDeck();
     this.shuffleDeck();
@@ -183,6 +205,15 @@ class GameState {
     
     this.addLog(`Trump is ${this.trumpSuit} from ${this.formatCard(this.trumpCard)}`);
     this.addLog(`5-card combos will be unlocked when the trump card is drawn!`);
+  }
+
+  // Check if any player already has been dealt cards
+  playersDealt() {
+    for (const pid of this.players) {
+      const hand = this.playerHands[pid];
+      if (hand && hand.length > 0) return true;
+    }
+    return false;
   }
 
   // Create standard 54-card deck
@@ -236,6 +267,10 @@ class GameState {
         }
       }
     }
+    
+    // ① DEAL DEBUG - Check if cards were dealt correctly
+    console.log("🂡 DEAL DEBUG – playerHands after dealing:",
+      JSON.stringify(this.playerHands, null, 2));
   }
 
   // Play a card - ONLY server validates
@@ -574,6 +609,9 @@ class GameState {
 
     this.addLog(`${playerId} picked up ${pileCards.length} cards`);
 
+    // Draw cards to maintain hand size for all players
+    this.drawCardsToHandSize();
+
     // Move to next player
     this.nextTurn();
 
@@ -681,6 +719,7 @@ class GameState {
         id,
         cardCount: this.playerHands[id]?.length || 0
       })),
+      playerHands: this.playerHands,
       playerData: this.getPlayerData(),
       deckCount: this.deck.length,
       discardCount: this.deadPile.length,
@@ -710,13 +749,68 @@ class GameState {
 
   // Get public state (without revealing other players' hands)
   getPublicState(playerId) {
+    // ✅ DEBUG: Log playerId matching
+    const playerHasHand = this.playerHands[playerId] !== undefined;
+    const handLength = this.playerHands[playerId]?.length || 0;
+    
+    console.log(`🔍 getPublicState called for playerId: ${playerId}`, {
+      playerId,
+      playersInGame: this.players,
+      playerHandsKeys: Object.keys(this.playerHands),
+      playerInPlayers: this.players.includes(playerId),
+      playerHasHand,
+      handLength,
+      playerHandsValue: this.playerHands[playerId]
+    });
+    
     const state = this.getState();
-    return {
+    const hand = Array.isArray(this.playerHands[playerId]) ? this.playerHands[playerId] : [];
+    
+    // ✅ DEBUG: Log what we're returning
+    console.log(`🔍 getPublicState returning for ${playerId}:`, {
+      handLength: hand.length,
+      handIsArray: Array.isArray(hand),
+      playerHandsKeys: Object.keys({ [playerId]: hand }),
+      handSample: hand.slice(0, 2) // Show first 2 cards for debugging
+    });
+    
+    // ✅ FIX: Build publicState explicitly to ensure hand and playerHands are included
+    // Don't rely on spread operator which might not override correctly
+    const publicState = {
       ...state,
+      // Recompute public-friendly aggregates explicitly
+      players: this.players.map(id => ({
+        id,
+        cardCount: this.playerHands[id]?.length || 0
+      })),
+      deckCount: this.deck.length,
+      discardCount: this.deadPile.length,
+      logs: this.log.slice(-20),
+      // ✅ CRITICAL: Explicitly set hand and playerHands AFTER spread to ensure they're included
+      hand: hand,
+      // Backward compatibility: scoped playerHands map
       playerHands: {
-        [playerId]: this.playerHands[playerId] || []
+        [playerId]: hand
       }
     };
+    
+    // ✅ VERIFY: Double-check that hand and playerHands are set
+    if (!publicState.hand || publicState.hand.length === 0) {
+      console.error(`❌ ERROR: publicState.hand is empty for playerId ${playerId}!`, {
+        hand,
+        playerHands: this.playerHands[playerId],
+        playerHandsKeys: Object.keys(this.playerHands)
+      });
+    }
+    
+    if (!publicState.playerHands || !publicState.playerHands[playerId]) {
+      console.error(`❌ ERROR: publicState.playerHands[${playerId}] is missing!`, {
+        publicStatePlayerHands: publicState.playerHands,
+        hand
+      });
+    }
+    
+    return publicState;
   }
 
   // Get player's private state (their hand only) - DEPRECATED, use getPublicState

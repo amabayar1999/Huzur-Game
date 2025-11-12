@@ -1,18 +1,69 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 
-export default function Lobby({ socket, playerId }) {
+export default function Lobby({ socket, playerId: propPlayerId }) {
+  // 🪪 Persistent player identity - ensure stable playerId across sessions
+  const [playerId] = useState(() => {
+    if (propPlayerId) return propPlayerId;
+    // Fallback: Get or create stable playerId from localStorage
+    let storedPlayerId = localStorage.getItem("playerId");
+    if (!storedPlayerId) {
+      storedPlayerId = crypto.randomUUID();
+      localStorage.setItem("playerId", storedPlayerId);
+    }
+    return storedPlayerId;
+  });
+
+  // 🏠 Persistent room identity - restore roomId from localStorage
+  const [roomId, setRoomId] = useState(() => {
+    return localStorage.getItem("roomId") || '';
+  });
+
   const [rooms, setRooms] = useState([]);
-  const [roomId, setRoomId] = useState('');
   const [gameState, setGameState] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [canJoin, setCanJoin] = useState(true);
   const [canSpectate, setCanSpectate] = useState(false);
-  const [oldPlayerId, setOldPlayerId] = useState(null);
   const router = useRouter();
+
+  // ✅ Helper: Update roomId state and localStorage (stable function)
+  const updateRoomId = useCallback((newRoomId) => {
+    setRoomId(newRoomId);
+    if (newRoomId) {
+      localStorage.setItem("roomId", newRoomId);
+    } else {
+      localStorage.removeItem("roomId");
+    }
+  }, []);
+
+  // ✅ Auto-reconnect logic: Check for stored room and rejoin on mount
+  useEffect(() => {
+    const storedRoom = localStorage.getItem("roomId");
+    const storedPlayer = localStorage.getItem("playerId") || playerId;
+    
+    if (!socket || !storedRoom || !storedPlayer) return;
+
+    console.log(`♻️ Attempting auto-rejoin to ${storedRoom}`);
+    setLoading(true);
+    
+    socket.emit("join_room", { roomId: storedRoom, playerId: storedPlayer }, (res) => {
+      setLoading(false);
+      
+      if (res?.ok) {
+        console.log("✅ Auto-rejoin success");
+        setGameState(res.data.gameState);
+        updateRoomId(storedRoom);
+      } else {
+        console.warn("❌ Auto-rejoin failed:", res?.error);
+        // Invalid room, clear cache
+        localStorage.removeItem("roomId");
+        setRoomId('');
+      }
+    });
+  }, [socket, playerId, updateRoomId]);
 
   // Handle server events
   useEffect(() => {
@@ -21,30 +72,42 @@ export default function Lobby({ socket, playerId }) {
     // Debug: Log all socket events
     socket.onAny((event, ...args) => {
       console.log("📡 [socket event]", event, args);
-    });
-
-    // Store old player ID when connecting
-    socket.on('connect', () => {
-      if (!oldPlayerId) {
-        setOldPlayerId(socket.id);
+      if (event === 'game_started') {
+        console.log("🎮 GAME_STARTED EVENT RECEIVED!", args);
       }
     });
 
     // Handle reconnection
     socket.on('reconnect', () => {
       console.log('🔄 Socket reconnected, attempting to rejoin room...');
-      if (roomId && oldPlayerId && oldPlayerId !== socket.id) {
-        // Try to reconnect with old player ID
-        handleReconnectToRoom();
+      const storedRoom = localStorage.getItem("roomId");
+      const storedPlayer = localStorage.getItem("playerId") || playerId;
+      
+      if (storedRoom && storedPlayer) {
+        console.log(`♻️ Reconnecting to room ${storedRoom}`);
+        setLoading(true);
+        
+        socket.emit("join_room", { roomId: storedRoom, playerId: storedPlayer }, (res) => {
+          setLoading(false);
+          
+          if (res?.ok) {
+            console.log("✅ Reconnection successful");
+            setGameState(res.data.gameState);
+          } else {
+            console.warn("❌ Reconnection failed:", res?.error);
+            localStorage.removeItem("roomId");
+            setRoomId('');
+          }
+        });
       }
     });
 
     // Room created
     socket.on('room_created', (data) => {
+      console.log("📦 room_created", data);
       setGameState(data.gameState);
-      setRoomId(data.roomId);
+      updateRoomId(data.roomId);
       setError(null);
-      console.log('Room created:', data);
       
       // Debug: Log the created room state
       console.log('Created room state:', {
@@ -59,10 +122,10 @@ export default function Lobby({ socket, playerId }) {
 
     // Room joined
     socket.on('room_joined', (data) => {
+      console.log("📦 room_joined", data);
       setGameState(data.gameState);
-      setRoomId(data.roomId);
+      updateRoomId(data.roomId);
       setError(null);
-      console.log('Room joined:', data);
       
       // Debug: Log the joined room state
       console.log('Joined room state:', {
@@ -77,13 +140,13 @@ export default function Lobby({ socket, playerId }) {
 
     // Room rejoined (for reconnections)
     socket.on('room_rejoined', (data) => {
+      console.log("📦 room_rejoined", data);
       setGameState(data.gameState);
-      setRoomId(data.roomId);
+      updateRoomId(data.roomId);
       setError(null);
-      console.log('Room rejoined:', data);
       
       // Navigate to game if it's started
-      if (data.gameState && data.gameState.gameStarted) {
+      if (data.gameState && (data.gameState.gameStarted || data.gameState.started)) {
         router.push(`/multiplayer/game/${data.roomId}`);
       }
     });
@@ -110,28 +173,24 @@ export default function Lobby({ socket, playerId }) {
     });
 
     // Game started - unified handler
-    const handleGameStarted = (data) => {
-      console.log("🎮 Game started event received:", data);
-      console.log("🧾 raw game_started data:", JSON.stringify(data, null, 2));
-      console.log("🎮 About to update state...");
-
+    socket.on('game_started', (data) => {
+      console.log("🎮 game_started", data);
       const state = data.gameState || data;
       setGameState(state);
-      console.log("🎮 Game state updated, navigating...");
 
-      // Ensure we have a valid roomId
-      const targetRoomId = state.roomId || roomId;
-      if (!targetRoomId) {
+      // ✅ FIX: Navigate to game room if we're still on lobby page
+      // (If navigation already happened from handleStartGame ACK, this is a backup)
+      const targetRoomId = state.roomId || data.roomId || roomId;
+      if (targetRoomId) {
+        updateRoomId(targetRoomId);
+        // Only navigate if we haven't already navigated (check current path)
+        // Navigation already happened in handleStartGame ACK, but this ensures it happens
+        router.push(`/multiplayer/game/${targetRoomId}`);
+      } else {
         console.error('❌ No roomId found in game_started payload:', data);
         setError('Game started but missing room ID');
-        return;
       }
-
-      console.log('🎮 Navigating to game room:', targetRoomId);
-      router.push(`/multiplayer/game/${targetRoomId}`);
-    };
-
-    socket.on('game_started', handleGameStarted);
+    });
 
     // ✅ FIX: Handle game already started notification
     socket.on('game_already_started', (data) => {
@@ -139,6 +198,7 @@ export default function Lobby({ socket, playerId }) {
       // Navigate to game room if game is already started
       if (data.roomId) {
         console.log('🎮 Navigating to game room...');
+        updateRoomId(data.roomId);
         router.push(`/multiplayer/game/${data.roomId}`);
       }
     });
@@ -147,19 +207,32 @@ export default function Lobby({ socket, playerId }) {
     socket.on('reconnected', (data) => {
       console.log('🔄 Successfully reconnected:', data);
       setGameState(data.gameState);
-      setRoomId(data.roomId);
+      updateRoomId(data.roomId);
       setError(null);
       
       // Navigate to game if it's started
-      if (data.gameState && data.gameState.gameStarted) {
+      if (data.gameState && (data.gameState.gameStarted || data.gameState.started)) {
         router.push(`/multiplayer/game/${data.roomId}`);
       }
     });
 
     // Update state
     socket.on('update_state', (data) => {
-      setGameState(data);
-      console.log('State updated:', data);
+      // ✅ FIX: Handle both direct gameState and nested gameState
+      const newState = data.gameState || data;
+      setGameState(newState);
+      console.log('State updated:', newState);
+    });
+
+    // ✅ FIX: Handle room_state event (from get_room_state)
+    socket.on('room_state', (data) => {
+      console.log('🏠 Room state received:', data);
+      // Handle both direct state and nested gameState
+      const newState = data.gameState || data;
+      setGameState(newState);
+      if (data.roomId) {
+        updateRoomId(data.roomId);
+      }
     });
 
     // ✅ FIX: Handle server errors with proper error codes
@@ -200,50 +273,31 @@ export default function Lobby({ socket, playerId }) {
       socket.offAny();
       socket.off('room_created');
       socket.off('room_joined');
+      socket.off('room_rejoined');
       socket.off('player_joined');
       socket.off('player_left');
-      socket.off('game_started', handleGameStarted);
+      socket.off('game_started');
       socket.off('game_already_started');
+      socket.off('reconnected');
       socket.off('update_state');
+      socket.off('room_state');
       socket.off('server_error');
       socket.off('error');
       socket.off('rooms_list');
+      socket.off('reconnect');
     };
-  }, [socket, oldPlayerId, roomId, router]);
+  }, [socket, playerId, router]);
 
-  // Add reconnection handler
-  const handleReconnectToRoom = () => {
-    if (!socket || !roomId || !oldPlayerId) return;
-    
-    setLoading(true);
-    setError(null);
-    
-    socket.emit('join_room', { 
-      roomId, 
-      oldPlayerId: oldPlayerId !== socket.id ? oldPlayerId : null 
-    }, (res) => {
-      setLoading(false);
-      
-      if (!res?.ok) {
-        console.error('❌ Reconnection failed:', res?.error || res);
-        setError(res?.error?.message || 'Failed to reconnect to room');
-        return;
-      }
-      
-      console.log('✅ Successfully reconnected to room');
-    });
-  };
-
-  // Create room
+  // 🏗️ Host flow: Create room once and store roomId
   const handleCreateRoom = () => {
     if (!socket) return;
     
+    console.log("🏗️ Creating new room...");
     setLoading(true);
     setError(null);
     
-    // ✅ FIX: Use ACK callback for proper error handling and send playerId
+    // ✅ FIX: Only emit create_room once, let server handle duplicates
     socket.emit('create_room', { 
-      roomId: '', 
       playerId: playerId // Send the stable playerId
     }, (res) => {
       setLoading(false);
@@ -254,29 +308,29 @@ export default function Lobby({ socket, playerId }) {
         return;
       }
       
-      // Success is handled by the 'room_created' event
-      console.log('✅ Room creation ACK received:', res.data);
+      // ✅ Store roomId from ACK response
+      const { roomId: newRoomId, gameState: roomState } = res.data || {};
+      if (newRoomId) {
+        updateRoomId(newRoomId);
+        setGameState(roomState);
+        console.log("✅ Room created:", newRoomId);
+      } else {
+        console.log("✅ Room creation ACK received (roomId will come from event)");
+      }
     });
   };
 
-  // Join room
-  const handleJoinRoom = () => {
-    if (!socket || !roomId.trim()) return;
+  // 🎮 Guest flow: Join existing room using room code
+  const handleJoinRoom = (roomIdInput) => {
+    const targetRoomId = (roomIdInput || roomId).trim();
+    if (!socket || !targetRoomId) return;
     
-    // ✅ FIX: Prevent joining if game is already started
-    if (gameState && gameState.gameStarted) {
-      setError('This game already started. You can observe or wait for the next round.');
-      setCanJoin(false);
-      setCanSpectate(true);
-      return;
-    }
-    
+    console.log("🎮 Joining room:", targetRoomId);
     setLoading(true);
     setError(null);
     
-    // ✅ FIX: Use ACK-based error handling with stable playerId
     socket.emit('join_room', { 
-      roomId: roomId.trim(),
+      roomId: targetRoomId,
       playerId: playerId // Send stable playerId
     }, (res) => {
       setLoading(false);
@@ -284,9 +338,8 @@ export default function Lobby({ socket, playerId }) {
       if (!res?.ok) {
         console.error('❌ join_room failed:', res?.error || res);
         
-        // ✅ FIX: Handle specific error codes
+        // ✅ Handle specific error codes
         if (res?.error?.code === 'GAME_ALREADY_STARTED') {
-          // ✅ Don't treat this as an error - it's handled by game_already_started event
           console.log('🎮 Game already started - handled by game_already_started event');
           setCanJoin(false);
           setCanSpectate(true);
@@ -297,20 +350,28 @@ export default function Lobby({ socket, playerId }) {
         return;
       }
       
-      // ✅ FIX: Handle spectator mode
+      // ✅ Store roomId from ACK response
+      const { roomId: joinedRoomId, gameState: roomState } = res.data || {};
+      if (joinedRoomId) {
+        updateRoomId(joinedRoomId);
+        setGameState(roomState);
+        console.log("✅ Joined room:", joinedRoomId);
+      }
+      
+      // ✅ Handle spectator mode
       if (res?.data?.isSpectator) {
         console.log('✅ Joined as spectator:', res.data);
         setCanJoin(false);
         setCanSpectate(true);
       }
-      
-      // Success is handled by the 'room_joined' event
-      console.log('✅ Room join ACK received:', res.data);
     });
   };
 
   // Start game
   const handleStartGame = async () => {
+    console.log("🎮 handleStartGame called");
+    console.log("🎮 Current state:", { socket: !!socket, gameStarted: gameState?.gameStarted, canStart: gameState?.canStart });
+    
     if (!socket || gameState?.gameStarted) return; // ✅ prevent duplicate emits
     
     // ✅ Additional validation: Check if we actually have enough players
@@ -322,6 +383,8 @@ export default function Lobby({ socket, playerId }) {
     setLoading(true);
     setError(null);
 
+    console.log("🎮 Emitting start_game event with playerId:", playerId);
+
     // ✅ UI-side fail-safe timeout
     const timeoutId = setTimeout(() => {
       if (loading) {
@@ -332,6 +395,7 @@ export default function Lobby({ socket, playerId }) {
     }, 7000);
 
     socket.emit("start_game", { playerId }, (res) => {
+      console.log("🎮 start_game ACK received:", res);
       clearTimeout(timeoutId); // ✅ Clear timeout on successful ACK
       setLoading(false);
       if (!res?.ok) {
@@ -351,10 +415,16 @@ export default function Lobby({ socket, playerId }) {
         }
         return;
       }
-
-      console.log("✅ Game start ACK received:", res.data);
-      // Optional: update local state immediately
-      if (res.data?.gameState?.gameStarted) setGameState(res.data.gameState);
+      
+      // ✅ FIX: Navigate immediately to game room after successful ACK
+      // Don't wait for game_started event - navigate right away
+      if (roomId) {
+        console.log("✅ Game start acknowledged - navigating to game room:", roomId);
+        router.push(`/multiplayer/game/${roomId}`);
+      } else {
+        console.warn("⚠️ No roomId available for navigation");
+        // Wait for game_started event which will have roomId
+      }
     });
   };
 
@@ -365,46 +435,9 @@ export default function Lobby({ socket, playerId }) {
     socket.emit('get_rooms');
   };
 
-  // Join specific room
+  // Join specific room (from available rooms list)
   const handleJoinSpecificRoom = (targetRoomId) => {
-    if (!socket) return;
-    
-    setLoading(true);
-    setError(null);
-    
-    // ✅ FIX: Use ACK callback for proper error handling with stable playerId
-    socket.emit('join_room', { 
-      roomId: targetRoomId,
-      playerId: playerId // Send stable playerId
-    }, (res) => {
-      setLoading(false);
-      
-      if (!res?.ok) {
-        console.error('❌ join_room failed:', res?.error || res);
-        
-        // Handle specific error codes
-        if (res?.error?.code === 'GAME_ALREADY_STARTED') {
-          // ✅ Don't treat this as an error - it's handled by game_already_started event
-          console.log('🎮 Game already started - handled by game_already_started event');
-          setCanJoin(false);
-          setCanSpectate(true);
-          return;
-        }
-        
-        setError(res?.error?.message || 'Failed to join room');
-        return;
-      }
-      
-      // ✅ FIX: Handle spectator mode
-      if (res?.data?.isSpectator) {
-        console.log('✅ Joined as spectator:', res.data);
-        setCanJoin(false);
-        setCanSpectate(true);
-      }
-      
-      // Success is handled by the 'room_joined' event
-      console.log('✅ Room join ACK received:', res.data);
-    });
+    handleJoinRoom(targetRoomId);
   };
 
   // Check if current player is room owner
@@ -528,7 +561,7 @@ export default function Lobby({ socket, playerId }) {
               />
               
               <button
-                onClick={handleJoinRoom}
+                onClick={() => handleJoinRoom(roomId)}
                 disabled={loading || !roomId.trim() || !canJoin}
                 className="w-full px-6 py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-400 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg disabled:cursor-not-allowed"
               >
@@ -677,7 +710,7 @@ export default function Lobby({ socket, playerId }) {
               </div>
             </div>
 
-            {/* Start Game Button */}
+            {/* Start Game Button - Host Only */}
             {canStartGame && (
               <div className="mt-6 text-center">
                 <div className="mb-4 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
@@ -688,7 +721,13 @@ export default function Lobby({ socket, playerId }) {
                 </div>
                 <button
                   onClick={handleStartGame}
-                  disabled={loading}
+                  disabled={
+                    loading ||
+                    !gameState?.canStart ||
+                    playerId !== gameState?.roomOwner ||
+                    gameState?.started ||
+                    gameState?.gameStarted
+                  }
                   className="px-8 py-3 bg-green-500 hover:bg-green-600 disabled:bg-green-400 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg disabled:cursor-not-allowed"
                 >
                   {loading ? 'Starting...' : '🎮 Start Game'}
@@ -720,17 +759,7 @@ export default function Lobby({ socket, playerId }) {
               </div>
             )}
 
-            {/* Game Started - Navigate to Game */}
-            {(gameState.started || gameState.gameStarted) && (
-              <div className="mt-6 text-center">
-                <button
-                  onClick={() => router.push(`/multiplayer/game/${roomId}`)}
-                  className="px-8 py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg"
-                >
-                  🎮 Enter Game
-                </button>
-              </div>
-            )}
+            {/* ✅ FIX: Auto-navigate to game room when game starts - no button needed */}
           </div>
         )}
       </div>

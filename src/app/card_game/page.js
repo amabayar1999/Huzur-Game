@@ -524,7 +524,7 @@ function CardGameInner() {
       </main>
     </div>
   );
-}
+} 
 
 export default function CardGame() {
   return (

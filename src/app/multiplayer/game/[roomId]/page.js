@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { io } from 'socket.io-client';
 import ErrorBoundary from '../../../../components/ErrorBoundary';
@@ -18,6 +18,9 @@ function MultiplayerGamePage() {
   const [loadingTimeout, setLoadingTimeout] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  
+  // ✅ Ref guard to prevent duplicate socket setup in React StrictMode
+  const socketSetupRef = useRef(false);
 
   // Retry connection function
   const retryConnection = () => {
@@ -32,7 +35,7 @@ function MultiplayerGamePage() {
     }
   };
 
-  // Set a timeout for loading game state
+  // Set a timeout for loading game state - more aggressive automatic loading
   useEffect(() => {
     const timeout = setTimeout(() => {
       if (!gameState && connected) {
@@ -51,26 +54,33 @@ function MultiplayerGamePage() {
               setGameState(response.data);
               setError(null);
             } else {
-              console.error('❌ Sync state failed:', response?.error);
+              console.error('❌ Sync state failed:', response);
               setError('Failed to load game state. The room may not exist or the server may be unavailable.');
             }
           });
           
-          // Strategy 3: If still no response after 5 more seconds, show error
+          // Strategy 3: If still no response after 3 more seconds, show error
           setTimeout(() => {
             if (!gameState) {
               setError('Failed to load game state. The room may not exist or the server may be unavailable.');
             }
-          }, 5000);
+          }, 3000);
         }
       }
-    }, 10000); // Reduced to 10 seconds for faster feedback
+    }, 5000); // ✅ Reduced to 5 seconds for faster automatic loading
 
     return () => clearTimeout(timeout);
   }, [gameState, connected, socket]);
 
   useEffect(() => {
     if (!roomId) return;
+    
+    // ✅ Guard: Prevent duplicate socket setup in React StrictMode
+    if (socketSetupRef.current) {
+      console.log('⚠️ Socket setup already in progress, skipping duplicate setup');
+      return;
+    }
+    socketSetupRef.current = true;
 
     // Generate or retrieve stable player ID (same as lobby)
     let userId = localStorage.getItem("uid");
@@ -80,7 +90,17 @@ function MultiplayerGamePage() {
     }
 
     // Initialize socket connection to clean server
-    const newSocket = io('http://localhost:4000', {
+    // Get the server URL dynamically based on current hostname
+    const getServerUrl = () => {
+      if (typeof window !== 'undefined') {
+        const hostname = window.location.hostname;
+        // Use the current hostname with port 4000
+        return `http://${hostname}:4000`;
+      }
+      return 'http://localhost:4000'; // Fallback for SSR
+    };
+    
+    const newSocket = io(getServerUrl(), {
       autoConnect: true,
       reconnection: true,
       reconnectionAttempts: 5,
@@ -102,13 +122,34 @@ function MultiplayerGamePage() {
       // Join room with proper ACK handling
       console.log('🎮 Joining room:', roomId);
       newSocket.emit('join_room', { roomId, playerId: userId }, (res) => {
-        if (!res?.ok) {
-          console.error('❌ Failed to join room:', res?.error);
-          setError(res?.error?.message || 'Failed to join room');
+        if (!res || res.ok === false) {
+          console.error('❌ Failed to join room:', res);
+          const msg = (res && res.error && res.error.message) ? res.error.message : 'Failed to join room';
+          setError(msg);
+          // Fallback in case ACK was missed: ask for room state
+          newSocket.emit('get_room_state');
           return;
         }
         console.log('✅ Successfully joined room:', res.data);
-        // Game state will be received via room_joined event
+        
+        // ✅ AUTOMATIC LOADING: If game state is in the ACK response, use it immediately
+        if (res.data?.gameState) {
+          console.log('🎮 Game state received in join ACK, setting immediately');
+          setGameState(res.data.gameState);
+          setError(null);
+        } else {
+          // ✅ AUTOMATIC LOADING: If no game state in ACK, request it immediately
+          console.log('🔄 No game state in ACK, requesting immediately');
+          newSocket.emit('get_room_state');
+        }
+        
+        // ✅ AUTOMATIC LOADING: Additional fallback sync request after 1 second
+        setTimeout(() => {
+          if (!gameState && newSocket.connected) {
+            console.log('🔄 Fallback automatic sync request');
+            newSocket.emit('get_room_state');
+          }
+        }, 1000);
       });
     });
 
@@ -116,6 +157,7 @@ function MultiplayerGamePage() {
       console.log('🔌 Disconnected from server');
       setConnected(false);
     });
+
 
     newSocket.on('connect_error', (err) => {
       console.error('❌ Connection error:', err);
@@ -146,34 +188,96 @@ function MultiplayerGamePage() {
     // Game events
     newSocket.on('room_joined', (data) => {
       console.log('👤 Joined room:', data);
+      console.log('🎮 Game state debug:', {
+        gameState: data.gameState || data,
+        started: (data.gameState || data)?.started,
+        gameStarted: (data.gameState || data)?.gameStarted,
+        playerCount: (data.gameState || data)?.playerCount,
+        players: (data.gameState || data)?.players
+      });
       setGameState(data.gameState || data);
       setError(null); // Clear any previous errors
     });
 
     newSocket.on('room_rejoined', (data) => {
       console.log('♻️ Rejoined room:', data);
+      console.log('🎮 Rejoined game state debug:', {
+        gameState: data.gameState || data,
+        started: (data.gameState || data)?.started,
+        gameStarted: (data.gameState || data)?.gameStarted,
+        playerCount: (data.gameState || data)?.playerCount,
+        players: (data.gameState || data)?.players
+      });
       setGameState(data.gameState || data);
       setError(null); // Clear any previous errors
     });
 
+    // Only replace state when a private view is present to avoid wiping hand
+    const setIfPrivate = (data) => {
+      const s = data?.gameState || data;
+      const hasHand = Array.isArray(s?.hand);
+      const hasScopedHands = s?.playerHands && Object.keys(s.playerHands).length > 0;
+      if (hasHand || hasScopedHands) {
+        setGameState(s);
+      }
+    };
+
     newSocket.on('player_joined', (data) => {
       console.log('👤 Player joined:', data);
-      setGameState(data.gameState || data);
+      setIfPrivate(data);
     });
 
     newSocket.on('player_left', (data) => {
       console.log('👋 Player left:', data);
-      setGameState(data.gameState || data);
+      setIfPrivate(data);
     });
 
     newSocket.on('player_reconnected', (data) => {
       console.log('♻️ Player reconnected:', data);
-      setGameState(data.gameState || data);
+      setIfPrivate(data);
     });
+
+    // Handle game start: receive per-player public state including dealt hand
+    const handleGameStarted = (data) => {
+      console.log('🎮 Game started event received:', data);
+      
+      // ✅ Guard: Prevent duplicate game start processing
+      const gameStateData = data.gameState || data;
+      
+      // ✅ Use userId from closure (not from state which might be null)
+      const currentUserId = userId; // Use userId from the outer scope
+      
+      // Use functional update to check current state
+      setGameState((currentState) => {
+        const currentStarted = currentState?.started || currentState?.gameStarted;
+        const newStarted = gameStateData?.started || gameStateData?.gameStarted;
+        
+        if (currentStarted && newStarted) {
+          console.log('⚠️ Game already started in state, ignoring duplicate game_started event');
+          return currentState; // Don't update if already started
+        }
+        
+        // ③ CLIENT DEBUG - Check received hand using currentUserId
+        const receivedHand = gameStateData.hand || gameStateData.playerHands?.[currentUserId];
+        console.log("🎮 CLIENT DEBUG – received hand:",
+          receivedHand || "NOT FOUND",
+          "hand length:", receivedHand?.length || 0,
+          "playerId (userId):", currentUserId,
+          "playerHands keys:", gameStateData.playerHands ? Object.keys(gameStateData.playerHands) : "N/A",
+          "full playerHands:", gameStateData.playerHands,
+          "gameState.hand:", gameStateData.hand);
+        
+        return gameStateData; // Update to new state
+      });
+      
+      setError(null);
+    };
+    
+    newSocket.on('game_started', handleGameStarted);
 
     newSocket.on('update_state', (data) => {
       console.log('🔄 State updated:', data);
-      setGameState(data.gameState || data);
+      setIfPrivate(data);
     });
 
     newSocket.on('room_state', (data) => {
@@ -188,13 +292,13 @@ function MultiplayerGamePage() {
       setSyncing(false);
     });
 
-    // Error handling
+    // Error handling (socket error event)
     newSocket.on('error', (data) => {
       console.error('❌ Server error:', data);
-      if (data && data.message) {
-        setError(data.message);
-        // If it's a room not found error, redirect back to lobby
-        if (data.message.includes('Room not found') || data.message.includes('Room not found')) {
+      const msg = (data && data.message) ? data.message : null;
+      if (msg) {
+        setError(msg);
+        if (msg.includes('Room not found')) {
           setTimeout(() => {
             window.location.href = '/multiplayer';
           }, 2000);
@@ -205,14 +309,12 @@ function MultiplayerGamePage() {
     // Handle server errors with proper error codes
     newSocket.on('server_error', (data) => {
       console.error('❌ Server error:', data);
-      if (data && data.message) {
-        setError(data.message);
-        // If it's a room not found error, redirect back to lobby
-        if (data.message.includes('Room not found') || data.message.includes('Room not found')) {
-          setTimeout(() => {
-            window.location.href = '/multiplayer';
-          }, 2000);
-        }
+      const msg = (data && data.message) ? data.message : 'Server error occurred';
+      setError(msg);
+      if (msg.includes('Room not found')) {
+        setTimeout(() => {
+          window.location.href = '/multiplayer';
+        }, 2000);
       }
     });
 
@@ -232,9 +334,32 @@ function MultiplayerGamePage() {
 
     setSocket(newSocket);
 
-    // Cleanup on unmount
+    // ✅ Cleanup on unmount: Remove all listeners explicitly to prevent duplicates
     return () => {
+      console.log('🧹 Cleaning up socket listeners');
+      
+      // Remove all event listeners explicitly
+      newSocket.off('connect');
+      newSocket.off('disconnect');
+      newSocket.off('connect_error');
+      newSocket.off('error');
+      newSocket.off('room_joined');
+      newSocket.off('room_rejoined');
+      newSocket.off('player_joined');
+      newSocket.off('player_left');
+      newSocket.off('player_reconnected');
+      newSocket.off('game_started');
+      newSocket.off('update_state');
+      newSocket.off('room_state');
+      newSocket.off('state_synced');
+      newSocket.off('server_error');
+      newSocket.off('join_room_error');
+      
+      // Close the socket connection
       newSocket.close();
+      
+      // Reset the ref guard
+      socketSetupRef.current = false;
     };
   }, [roomId]);
 
@@ -373,7 +498,25 @@ function MultiplayerGamePage() {
               </button>
               <button 
                 className="px-3 py-2 sm:px-4 sm:py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg text-sm sm:text-base" 
-                onClick={() => window.location.href = '/multiplayer'}
+                onClick={() => {
+                  if (socket) {
+                    // Emit leave_room event
+                    socket.emit('leave_room');
+                    
+                    // Listen for confirmation
+                    socket.once('room_left', () => {
+                      window.location.href = '/multiplayer';
+                    });
+                    
+                    // Fallback: redirect after 1 second even if no confirmation
+                    setTimeout(() => {
+                      window.location.href = '/multiplayer';
+                    }, 1000);
+                  } else {
+                    // If no socket, just redirect
+                    window.location.href = '/multiplayer';
+                  }
+                }}
               >
                 🚪 Leave Game
               </button>

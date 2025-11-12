@@ -12,15 +12,31 @@ function MultiplayerLobby() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    // Generate or retrieve stable player ID
-    let userId = localStorage.getItem("uid");
+    // 🪪 Generate or retrieve stable player ID (consistent with Lobby)
+    let userId = localStorage.getItem("playerId") || localStorage.getItem("uid");
     if (!userId) {
       userId = crypto.randomUUID();
+      localStorage.setItem("playerId", userId);
+      // Also set uid for backward compatibility
+      localStorage.setItem("uid", userId);
+    } else {
+      // Ensure both keys are set for consistency
+      localStorage.setItem("playerId", userId);
       localStorage.setItem("uid", userId);
     }
     
     // Initialize socket connection to clean server
-    const newSocket = io('http://localhost:4000', {
+    // Get the server URL dynamically based on current hostname
+    const getServerUrl = () => {
+      if (typeof window !== 'undefined') {
+        const hostname = window.location.hostname;
+        // Use the current hostname with port 4000
+        return `http://${hostname}:4000`;
+      }
+      return 'http://localhost:4000'; // Fallback for SSR
+    };
+    
+    const newSocket = io(getServerUrl(), {
       autoConnect: true,
       reconnection: true,
       reconnectionAttempts: 5,

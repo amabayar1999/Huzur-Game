@@ -271,6 +271,68 @@ class GameDatabase {
     });
   }
 
+  // Delete old games and related data older than N minutes (default 10)
+  deleteOldGames(minutes = 10) {
+    const offset = `-${minutes} minutes`;
+    const selectOldRooms = `
+    SELECT room_id FROM games 
+    WHERE updated_at < datetime('now', ?) 
+      AND status IN ('active', 'completed', 'archived')
+  `;
+    return new Promise((resolve, reject) => {
+      this.db.all(selectOldRooms, [offset], (err, rows) => {
+        if (err) return reject(err);
+        if (!rows || rows.length === 0) return resolve(0);
+
+        const roomIds = rows.map(r => r.room_id);
+        const placeholders = roomIds.map(() => '?').join(',');
+
+        const deletes = [
+          { sql: `DELETE FROM game_logs WHERE room_id IN (${placeholders})`, params: roomIds },
+          { sql: `DELETE FROM players WHERE room_id IN (${placeholders})`, params: roomIds },
+          { sql: `DELETE FROM game_stats WHERE room_id IN (${placeholders})`, params: roomIds },
+          { sql: `DELETE FROM games WHERE room_id IN (${placeholders})`, params: roomIds },
+        ];
+
+        const runNext = (i = 0) => {
+          if (i >= deletes.length) return resolve(roomIds.length);
+          const { sql, params } = deletes[i];
+          this.db.run(sql, params, (e) => (e ? reject(e) : runNext(i + 1)));
+        };
+        runNext();
+      });
+    });
+  }
+
+  // Delete ALL rooms and related data
+  clearAllRooms() {
+    return new Promise((resolve, reject) => {
+      const results = { gameLogsDeleted: 0, playersDeleted: 0, statsDeleted: 0, gamesDeleted: 0 };
+
+      const runWithChanges = (sql) => new Promise((res, rej) => {
+        this.db.run(sql, function(err) {
+          if (err) return rej(err);
+          res(this.changes || 0);
+        });
+      });
+
+      this.db.serialize(async () => {
+        try {
+          await runWithChanges('BEGIN IMMEDIATE');
+          results.gameLogsDeleted = await runWithChanges('DELETE FROM game_logs');
+          results.playersDeleted = await runWithChanges('DELETE FROM players');
+          results.statsDeleted = await runWithChanges('DELETE FROM game_stats');
+          results.gamesDeleted = await runWithChanges('DELETE FROM games');
+          await runWithChanges('COMMIT');
+          resolve(results);
+        } catch (err) {
+          try { await runWithChanges('ROLLBACK'); } catch (_) {}
+          reject(err);
+        }
+      });
+    });
+  }
+
   // Close database connection
   close() {
     return new Promise((resolve) => {

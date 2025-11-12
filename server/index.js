@@ -14,7 +14,9 @@ const io = new Server(server, {
       "http://localhost:3000", 
       "http://127.0.0.1:3000",
       "http://localhost:3006", 
-      "http://127.0.0.1:3006"
+      "http://127.0.0.1:3006",
+      "http://10.56.81.235:3000",  // Phone access - Next.js app
+      "http://10.56.81.235:4000"   // Phone access - Socket.IO server
     ],
     methods: ["GET", "POST"],
     credentials: true,
@@ -152,13 +154,46 @@ async function startServer() {
     // Recover rooms from database first
     await recoverRoomsFromDatabase();
     
-    // Start the server
-    server.listen(PORT, () => {
+    // Start background cleanup once
+    (function startBackgroundCleanup() {
+      setInterval(async () => {
+        // 1) Purge old DB games by updated_at (10 minutes)
+        try {
+          const purged = await gameDB.deleteOldGames(10);
+          if (purged > 0) {
+            console.log(`🧹 Purged ${purged} old game(s) from DB (>=10 min inactive)`);
+          }
+        } catch (e) {
+          console.error('DB purge failed:', e);
+        }
+
+        // 2) Remove in-memory rooms that are empty and older than 10 minutes
+        try {
+          const now = Date.now();
+          for (const [roomId, gameState] of Object.entries(rooms)) {
+            const isEmpty = gameState.players.length === 0;
+            const tooOld = now - new Date(gameState.createdAt).getTime() > 10 * 60 * 1000;
+            if (isEmpty && tooOld) {
+              delete rooms[roomId];
+              performanceMonitor.trackRoomDeleted(roomId);
+              try { await gameDB.archiveGame(roomId); } catch {}
+              console.log(`🧹 Pruned empty in-memory room: ${roomId}`);
+            }
+          }
+        } catch (e) {
+          console.error('In-memory prune failed:', e);
+        }
+      }, 60 * 1000);
+    })();
+
+    // Start the server on all network interfaces
+    server.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Clean Huzur server running on port ${PORT}`);
       console.log(`🌐 Health check: http://localhost:${PORT}/health`);
       console.log(`📊 Metrics: http://localhost:${PORT}/metrics`);
       console.log(`🎯 Architecture: Server-authoritative, single source of truth`);
       console.log(`🚀 Ready for production multiplayer games!`);
+      console.log(`📱 Network access: Server listening on all interfaces (0.0.0.0:${PORT})`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

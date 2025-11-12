@@ -13,31 +13,100 @@ const rooms = {};
 // Socket ID to Player ID mapping for stable player identification
 const socketToPlayerMap = {};
 
+// Player ID to Room ID mapping for quick lookup
+const playerRooms = {};
+
 // Helper function to get effective player ID from socket
 function getEffectivePlayerId(socket) {
   return socketToPlayerMap[socket.id] || socket.id;
 }
 
 function handleGameEvents(io, socket) {
+  // Helper: emit per-socket public state to all sockets in room
+  async function broadcastPublicState(roomId, eventName, gameState) {
+    const sockets = await io.in(roomId).fetchSockets();
+    for (const s of sockets) {
+      const pid = socketToPlayerMap[s.id] || s.id;
+      s.emit(eventName, gameState.getPublicState(pid));
+    }
+  }
   
   // 1️⃣ CREATE ROOM
   socket.on("create_room", async (data, ack) => {
-    const roomId = data.roomId || Math.random().toString(36).substr(2, 6);
-    
-    // Check if room already exists
+    const effectivePlayerId = data.playerId || socket.id;
+
+    // ✅ FIX 1: Prevent multiple rooms per host
+    const existingRoom = Object.values(rooms).find(r => r.roomOwner === effectivePlayerId);
+    if (existingRoom) {
+      console.warn(`⚠️ ${effectivePlayerId} already owns room ${existingRoom.roomId} - reusing existing room`);
+      
+      // Rebind socket mappings
+      socketToPlayerMap[socket.id] = effectivePlayerId;
+      playerRooms[effectivePlayerId] = existingRoom.roomId;
+      socket.join(existingRoom.roomId);
+      
+      // Send ACK with existing room state
+      ack?.({ ok: true, data: { 
+        roomId: existingRoom.roomId,
+        gameState: existingRoom.getPublicState(effectivePlayerId) 
+      }});
+      
+      // Also emit room_created event for consistency
+      socket.emit("room_created", { 
+        roomId: existingRoom.roomId, 
+        gameState: existingRoom.getPublicState(effectivePlayerId) 
+      });
+      
+      return;
+    }
+
+    // ✅ FIX 2: Normalize roomId (handle empty string)
+    const requestedRoomId = data.roomId?.trim() || null;
+    const roomId = requestedRoomId || Math.random().toString(36).substr(2, 6);
+
+    // ✅ FIX 3: If this room already exists, reuse it instead of failing
     if (rooms[roomId]) {
-      const fail = { ok: false, error: { message: "Room already exists" } };
-      ack?.(fail);
+      console.warn(`⚠️ Room ${roomId} already exists - reusing existing GameState`);
+      
+      const existingGameState = rooms[roomId];
+      
+      // If player is not in the room, add them
+      if (!existingGameState.hasPlayer(effectivePlayerId)) {
+        existingGameState.addPlayer(effectivePlayerId);
+        await gameDB.addPlayer(roomId, effectivePlayerId);
+      }
+      
+      // Rebind socket mappings
+      socketToPlayerMap[socket.id] = effectivePlayerId;
+      playerRooms[effectivePlayerId] = roomId;
+      socket.join(roomId);
+      
+      // Send ACK with existing room state
+      ack?.({ ok: true, data: { 
+        roomId, 
+        gameState: existingGameState.getPublicState(effectivePlayerId) 
+      }});
+      
+      // Also emit room_created event for consistency
+      socket.emit("room_created", { 
+        roomId, 
+        gameState: existingGameState.getPublicState(effectivePlayerId) 
+      });
+      
       return;
     }
     
     try {
       // Create new game state
       const gameState = new GameState(roomId);
-      // ✅ FIX: Use playerId from client if provided, otherwise fallback to socket.id
-      const effectivePlayerId = data.playerId || socket.id;
-      socketToPlayerMap[socket.id] = effectivePlayerId;
+      
+      // ✅ FIX 4: Explicitly set room owner (already done in addPlayer, but be explicit)
       gameState.addPlayer(effectivePlayerId);
+      gameState.roomOwner = effectivePlayerId; // Explicit assignment
+      
+      // Store mappings
+      socketToPlayerMap[socket.id] = effectivePlayerId;
+      playerRooms[effectivePlayerId] = roomId;
       rooms[roomId] = gameState;
       
       // Save to database
@@ -54,16 +123,20 @@ function handleGameEvents(io, socket) {
       // Send success response
       socket.emit("room_created", { 
         roomId, 
-        gameState: gameState.getState() 
+        gameState: gameState.getPublicState(effectivePlayerId) 
       });
       
       // Send ACK response
-      ack?.({ ok: true, data: { roomId, gameState: gameState.getState() } });
+      ack?.({ ok: true, data: { 
+        roomId,  // ✅ FIX: Include roomId in ACK
+        gameState: gameState.getPublicState(effectivePlayerId) 
+      }});
       
-      console.log(`🏠 Room ${roomId} created by ${socket.id}`);
+      console.log(`🏠 Room ${roomId} created by ${effectivePlayerId}`);
     } catch (error) {
       console.error('Error creating room:', error);
-      performanceMonitor.trackError(error, { action: 'create_room', roomId });
+      const errorRoomId = typeof roomId !== 'undefined' ? roomId : 'unknown';
+      performanceMonitor.trackError(error, { action: 'create_room', roomId: errorRoomId });
       const fail = { ok: false, error: { message: "Failed to create room" } };
       ack?.(fail);
     }
@@ -91,8 +164,10 @@ function handleGameEvents(io, socket) {
     const effectivePlayerId = playerId || socket.id;
     if (gameState.started && !gameState.hasPlayer(effectivePlayerId)) {
       console.log(`🚫 Game in room ${roomId} already started. Blocking new join.`);
-      const fail = { ok: false, error: { message: "Game already started" } };
+      const fail = { ok: false, error: { message: "Game already started", code: 'GAME_ALREADY_STARTED' } };
       ack?.(fail);
+      // Inform client so it can choose to spectate/navigate appropriately
+      socket.emit('game_already_started', { roomId });
       return;
     }
 
@@ -102,27 +177,46 @@ function handleGameEvents(io, socket) {
       
     // ✅ Rejoining logic - check by playerId first, then socket.id
     if (gameState.hasPlayer(effectivePlayerId)) {
-      console.log(`♻️ Player rejoining existing game: ${effectivePlayerId}`);
+      console.log(`♻️ Reconnection detected for ${effectivePlayerId}`);
+      
+      // Join socket to existing room
       socket.join(roomId);
       
-      // Update socket mapping for reconnection
+      // Rebind mapping
       socketToPlayerMap[socket.id] = effectivePlayerId;
+      playerRooms[effectivePlayerId] = roomId;
       
+      // Mark player as online again
+      if (gameState.disconnectedPlayers) {
+        delete gameState.disconnectedPlayers[effectivePlayerId];
+      }
+      
+      // ✅ FIX: Check playerHands before rejoin to verify cards are still there
+      console.log("♻️ HAND CHECK:", JSON.stringify(gameState.playerHands));
+      
+      // Send their full current state (with their hand)
       const payload = {
         roomId,
-        gameState: gameState.getState(),
+        gameState: gameState.getPublicState(effectivePlayerId),
       };
+      
       socket.emit("room_rejoined", payload);
+      // ✅ AUTOMATIC LOADING: Always include game state in ACK response for rejoin
       ack?.({ ok: true, data: payload });
       
-      // Broadcast player reconnection to other players
-      io.to(roomId).emit("player_reconnected", gameState.getState());
+      // Let other players know
+      socket.to(roomId).emit("player_reconnected", { playerId: effectivePlayerId });
+      
       return;
     }
 
       // ✅ New player joining (game not started)
       gameState.addPlayer(effectivePlayerId);
       socket.join(roomId);
+      
+      // Store mappings
+      socketToPlayerMap[socket.id] = effectivePlayerId;
+      playerRooms[effectivePlayerId] = roomId;
 
       await gameDB.saveGameState(roomId, gameState.getState());
       await gameDB.addPlayer(roomId, effectivePlayerId);
@@ -131,13 +225,15 @@ function handleGameEvents(io, socket) {
       // Send current state to the joining player
       const payload = {
         roomId,
-        gameState: gameState.getState(),
+        gameState: gameState.getPublicState(effectivePlayerId),
       };
       socket.emit("room_joined", payload);
+      // ✅ AUTOMATIC LOADING: Always include game state in ACK response
       ack?.({ ok: true, data: payload });
 
-      // Broadcast updated player list to everyone in the room
-      io.to(roomId).emit("player_joined", gameState.getState());
+      // Broadcast complete state to other players (using getState to include all fields)
+      // Note: getState() doesn't reveal other players' hands, it only shows card counts
+      socket.to(roomId).emit("player_joined", gameState.getState());
 
       console.log(`👤 ${effectivePlayerId} joined room ${roomId}`);
     } catch (error) {
@@ -154,7 +250,7 @@ function handleGameEvents(io, socket) {
       const effectivePlayerId = getEffectivePlayerId(socket);
       
       // Find room for this player
-      const roomId = Object.keys(rooms).find(id => 
+      const roomId = playerRooms[effectivePlayerId] || Object.keys(rooms).find(id => 
         rooms[id].players.includes(effectivePlayerId)
       );
       
@@ -167,8 +263,9 @@ function handleGameEvents(io, socket) {
       gameState.removePlayer(effectivePlayerId);
       socket.leave(roomId);
       
-      // Clean up socket mapping
+      // Clean up socket mapping and player room mapping
       delete socketToPlayerMap[socket.id];
+      delete playerRooms[effectivePlayerId];
       
       // Save to database
       await gameDB.saveGameState(roomId, gameState.getState());
@@ -180,8 +277,8 @@ function handleGameEvents(io, socket) {
         delete rooms[roomId];
         performanceMonitor.trackRoomDeleted(roomId);
       } else {
-        // Broadcast updated state to remaining players
-        io.to(roomId).emit("player_left", gameState.getState());
+        // Broadcast per-player public state to remaining players
+        await broadcastPublicState(roomId, "player_left", gameState);
       }
       
       socket.emit("room_left", { roomId });
@@ -234,9 +331,14 @@ function handleGameEvents(io, socket) {
       // ✅ Idempotent: if already started, just ACK success
       if (gameState.started) {
         console.log("⚠️ Game already started in", roomId, "– returning OK");
-        const payload = { roomId, gameState: gameState.getState() };
+        const payload = { roomId, gameState: gameState.getPublicState(effectivePlayerId) };
         ack?.({ ok: true, data: payload }); // ✅ ACK first
-        socket.emit("game_started", payload); // resend event just in case client missed it
+        // Send per-player public state to each socket in the room
+        const sockets = await io.in(roomId).fetchSockets();
+        for (const s of sockets) {
+          const pid = socketToPlayerMap[s.id] || s.id;
+          s.emit("game_started", { roomId, gameState: gameState.getPublicState(pid) });
+        }
         return;
       }
 
@@ -248,16 +350,26 @@ function handleGameEvents(io, socket) {
         return;
       }
 
+      // ✅ Atomic guard: prevent concurrent start_game calls
+      if (gameState.starting) {
+        console.log("⚠️ Game start already in progress for", roomId);
+        ack?.({ ok: false, error: { message: "Game already starting", code: 'GAME_STARTING' } });
+        return;
+      }
+      gameState.starting = true;
+
       const result = gameState.startGame();
       if (!result.success) {
         console.log("❌ startGame() failed:", result.error);
+        // Clear the starting flag on failure
+        delete gameState.starting;
         const fail = { ok: false, error: { message: result.error, code: 'GAME_START_FAILED' } };
         ack?.(fail); // ✅ ACK immediately on failure
         return;
       }
 
       // ✅ Game successfully started - ACK before async operations
-      const payload = { roomId, gameState: gameState.getState() };
+      const payload = { roomId, gameState: gameState.getPublicState(effectivePlayerId) };
       ack?.({ ok: true, data: payload }); // ✅ ACK first to prevent timeout
       
       // Then do async operations
@@ -265,11 +377,137 @@ function handleGameEvents(io, socket) {
       await gameDB.logAction(roomId, socket.id, "game_started");
       performanceMonitor.trackGameStarted(roomId, gameState.players.length);
 
-      io.to(roomId).emit("game_started", payload);
+      // ② EMIT DEBUG - Check playerHands before sending to clients
+      console.log("🃏 EMIT DEBUG – playerHands snapshot before send:",
+        JSON.stringify(gameState.playerHands, null, 2));
+
+      // ✅ VERIFY: Ensure cards were actually dealt
+      const allPlayersHaveCards = gameState.players.every(pid => {
+        const hasCards = gameState.playerHands[pid] && gameState.playerHands[pid].length > 0;
+        if (!hasCards) {
+          console.error(`❌ Player ${pid} has no cards!`, {
+            playerHands: gameState.playerHands[pid],
+            playerHandsKeys: Object.keys(gameState.playerHands)
+          });
+        }
+        return hasCards;
+      });
+      
+      if (!allPlayersHaveCards) {
+        console.error(`❌ CRITICAL: Not all players have cards!`, {
+          players: gameState.players,
+          playerHands: gameState.playerHands,
+          playerHandsKeys: Object.keys(gameState.playerHands)
+        });
+      } else {
+        console.log(`✅ All players have cards:`, gameState.players.map(pid => ({
+          playerId: pid,
+          cardCount: gameState.playerHands[pid]?.length || 0
+        })));
+      }
+
+      // Send per-player public state to each socket in the room
+      const sockets = await io.in(roomId).fetchSockets();
+      for (const s of sockets) {
+        let pid = socketToPlayerMap[s.id] || s.id;
+        
+        // ✅ FIX: Ensure playerId is in the players array (cards are dealt to players in this.players)
+        // If the mapped playerId isn't in players, find the correct playerId from the players array
+        if (!gameState.players.includes(pid)) {
+          console.warn(`⚠️ Mapped playerId ${pid} not in players array. Players:`, gameState.players);
+          
+          // Find the playerId from players array that has this socket.id mapped to it
+          const correctPlayerId = gameState.players.find(playerId => {
+            // Check all socket mappings to see if this socket.id maps to this playerId
+            return Object.keys(socketToPlayerMap).some(socketId => 
+              socketId === s.id && socketToPlayerMap[socketId] === playerId
+            );
+          });
+          
+          if (correctPlayerId) {
+            pid = correctPlayerId;
+            // Update mapping for future use
+            socketToPlayerMap[s.id] = pid;
+            console.log(`✅ Fixed playerId mapping: socket ${s.id} -> ${pid}`);
+          } else {
+            // Last resort: use the first player (shouldn't happen, but better than failing)
+            console.error(`❌ Could not find correct playerId for socket ${s.id}. Socket mapping:`, 
+              socketToPlayerMap[s.id], 'Players:', gameState.players);
+            // Try to use the mapped value if it's close, otherwise use first player
+            if (gameState.players.length > 0) {
+              console.warn(`⚠️ Using fallback: first player in array: ${gameState.players[0]}`);
+              pid = gameState.players[0];
+            }
+          }
+        }
+        
+        // ✅ DEBUG: Log playerId mapping
+        console.log(`🎮 Broadcasting game_started to socket ${s.id}:`, {
+          socketId: s.id,
+          mappedPlayerId: pid,
+          playersInGame: gameState.players,
+          playerHandsKeys: Object.keys(gameState.playerHands),
+          playerInPlayers: gameState.players.includes(pid),
+          playerHasHand: gameState.playerHands[pid] ? gameState.playerHands[pid].length : 0
+        });
+        
+        const publicState = gameState.getPublicState(pid);
+        
+        // ✅ DEBUG: Log what's being sent
+        console.log(`🎮 Sending game_started to ${pid}:`, {
+          handLength: publicState.hand?.length || 0,
+          handIsArray: Array.isArray(publicState.hand),
+          playerHandsKeys: Object.keys(publicState.playerHands || {}),
+          playerHandsLength: publicState.playerHands?.[pid]?.length || 0,
+          hasHandProperty: 'hand' in publicState,
+          hasPlayerHandsProperty: 'playerHands' in publicState
+        });
+        
+        // ✅ VERIFY: Ensure hand and playerHands are actually in the object before sending
+        if (!publicState.hand || !Array.isArray(publicState.hand)) {
+          console.error(`❌ CRITICAL: publicState.hand is missing or not an array for ${pid}!`, {
+            publicStateKeys: Object.keys(publicState),
+            hand: publicState.hand,
+            playerHands: publicState.playerHands
+          });
+        }
+        
+        if (!publicState.playerHands || !publicState.playerHands[pid]) {
+          console.error(`❌ CRITICAL: publicState.playerHands[${pid}] is missing!`, {
+            publicStatePlayerHands: publicState.playerHands,
+            publicStateKeys: Object.keys(publicState)
+          });
+        }
+        
+        // ✅ Send the data
+        const payload = { roomId, gameState: publicState };
+        
+        // ✅ Final verification before emit
+        console.log(`📤 Emitting game_started to ${pid} with payload:`, {
+          roomId: payload.roomId,
+          gameStateKeys: Object.keys(payload.gameState || {}),
+          hasHand: 'hand' in (payload.gameState || {}),
+          hasPlayerHands: 'playerHands' in (payload.gameState || {}),
+          handLength: payload.gameState?.hand?.length || 0,
+          playerHandsKeys: payload.gameState?.playerHands ? Object.keys(payload.gameState.playerHands) : []
+        });
+        
+        s.emit("game_started", payload);
+      }
+      
+      // Clear the starting flag after broadcast completes
+      delete gameState.starting;
+      
+      // ✅ Final hands snapshot for debugging
+      console.log("✅ Final hands snapshot:", JSON.stringify(gameState.playerHands, null, 2));
       console.log(`🎮 Game started in room ${roomId}`);
     } catch (error) {
       console.error("💥 start_game error:", error);
       performanceMonitor.trackError(error, { action: "start_game" });
+      // Clear the starting flag on error
+      if (roomId && rooms[roomId]) {
+        delete rooms[roomId].starting;
+      }
       const fail = { ok: false, error: { message: "Failed to start game" } };
       ack?.(fail);
     }
@@ -304,8 +542,8 @@ function handleGameEvents(io, socket) {
         const cardType = Array.isArray(card) ? 'combo' : 'single';
         performanceMonitor.trackCardPlayed(roomId, effectivePlayerId, cardType);
         
-        // Broadcast updated state to all players
-        io.to(roomId).emit("update_state", gameState.getState());
+        // Broadcast per-player public state to all players
+        await broadcastPublicState(roomId, "update_state", gameState);
         console.log(`🃏 ${effectivePlayerId} played card in room ${roomId}`);
       } else {
         socket.emit("server_error", { message: result.error });
@@ -340,8 +578,8 @@ function handleGameEvents(io, socket) {
         await gameDB.saveGameState(roomId, gameState.getState());
         await gameDB.logAction(roomId, effectivePlayerId, 'pile_picked_up');
         
-        // Broadcast updated state to all players
-        io.to(roomId).emit("update_state", gameState.getState());
+        // Broadcast per-player public state to all players
+        await broadcastPublicState(roomId, "update_state", gameState);
         console.log(`📥 ${effectivePlayerId} picked up pile in room ${roomId}`);
       } else {
         socket.emit("server_error", { message: result.error });
@@ -369,7 +607,7 @@ function handleGameEvents(io, socket) {
       }
       
       const gameState = rooms[roomId];
-      socket.emit("room_state", gameState.getState());
+      socket.emit("room_state", gameState.getPublicState(effectivePlayerId));
     } catch (error) {
       console.error('Error getting room state:', error);
       performanceMonitor.trackError(error, { action: 'get_room_state' });
@@ -415,8 +653,8 @@ function handleGameEvents(io, socket) {
       // Get fresh state from database as backup
       const dbState = await gameDB.loadGameState(roomId);
       
-      // Use in-memory state if available, otherwise database state
-      const currentState = gameState ? gameState.getState() : dbState;
+      // Use in-memory public state if available, otherwise database state
+      const currentState = gameState ? gameState.getPublicState(effectivePlayerId) : dbState;
       
       if (!currentState) {
         const fail = { ok: false, error: { message: "Room state not found" } };
@@ -443,47 +681,76 @@ function handleGameEvents(io, socket) {
   socket.on("disconnect", async () => {
     try {
       const effectivePlayerId = getEffectivePlayerId(socket);
+      const roomId = playerRooms[effectivePlayerId];
       
-      // Find and remove player from all rooms
-      Object.keys(rooms).forEach(async (roomId) => {
-        const gameState = rooms[roomId];
-        if (gameState.players.includes(effectivePlayerId)) {
-          gameState.removePlayer(effectivePlayerId);
-          
-          // Clean up socket mapping
-          delete socketToPlayerMap[socket.id];
-          
-          // Save to database
-          await gameDB.saveGameState(roomId, gameState.getState());
-          await gameDB.removePlayer(roomId, effectivePlayerId);
-          await gameDB.logAction(roomId, effectivePlayerId, 'player_disconnected');
-          
-          // If no players left, mark room for cleanup but don't delete immediately
-          if (gameState.players.length === 0) {
-            // Set a cleanup timeout instead of immediate deletion
-            setTimeout(async () => {
-              // Double-check that no players have rejoined
-              if (rooms[roomId] && rooms[roomId].players.length === 0) {
-                console.log(`🧹 Cleaning up empty room: ${roomId}`);
-                delete rooms[roomId];
-                performanceMonitor.trackRoomDeleted(roomId);
-                
-                // Archive the room in database
-                try {
-                  await gameDB.archiveGame(roomId);
-                } catch (error) {
-                  console.error(`Failed to archive room ${roomId}:`, error);
-                }
-              }
-            }, 30000); // 30 second grace period for reconnection
-          } else {
-            // Broadcast updated state to remaining players
-            io.to(roomId).emit("player_disconnected", gameState.getState());
-          }
-          
-          console.log(`🔌 ${effectivePlayerId} disconnected from room ${roomId}`);
+      if (!effectivePlayerId || !roomId) {
+        // Socket wasn't associated with a player/room, just clean up mapping
+        delete socketToPlayerMap[socket.id];
+        return;
+      }
+
+      const gameState = rooms[roomId];
+      if (!gameState) {
+        // Room doesn't exist, clean up mapping
+        delete socketToPlayerMap[socket.id];
+        delete playerRooms[effectivePlayerId];
+        return;
+      }
+
+      if (!gameState.players.includes(effectivePlayerId)) {
+        // Player not in this game, clean up mapping
+        delete socketToPlayerMap[socket.id];
+        if (playerRooms[effectivePlayerId] === roomId) {
+          delete playerRooms[effectivePlayerId];
         }
-      });
+        return;
+      }
+
+      console.log(`🔌 ${effectivePlayerId} disconnected from ${roomId}`);
+
+      // 👇 Mark player as disconnected but keep their cards
+      gameState.disconnectedPlayers = gameState.disconnectedPlayers || {};
+      gameState.disconnectedPlayers[effectivePlayerId] = true;
+
+      // Don't remove them from players[]
+      // Don't clear playerHands[effectivePlayerId]
+
+      // Log disconnection but keep player in game
+      await gameDB.logAction(roomId, effectivePlayerId, 'player_disconnected');
+      
+      // Save current state (with player still in game)
+      await gameDB.saveGameState(roomId, gameState.getState());
+
+      // Optional: broadcast to others
+      socket.to(roomId).emit("player_disconnected", { playerId: effectivePlayerId });
+
+      // Clean socket references
+      delete socketToPlayerMap[socket.id];
+      // Note: Keep playerRooms[effectivePlayerId] so we can find room on reconnect
+
+      // Optional: if everyone disconnected, clean up after a timeout
+      const disconnectedCount = Object.keys(gameState.disconnectedPlayers || {}).length;
+      if (disconnectedCount === gameState.players.length) {
+        console.log(`🧹 All players disconnected from ${roomId} — scheduling cleanup`);
+        setTimeout(() => {
+          // Double-check that all players are still disconnected
+          const stillDisconnected = Object.keys(gameState.disconnectedPlayers || {}).length;
+          if (stillDisconnected === gameState.players.length && rooms[roomId]) {
+            console.log(`🧹 Room ${roomId} cleaned up`);
+            delete rooms[roomId];
+            performanceMonitor.trackRoomDeleted(roomId);
+            
+            // Archive the room in database
+            try {
+              gameDB.archiveGame(roomId).catch(err => 
+                console.error(`Failed to archive room ${roomId}:`, err)
+              );
+            } catch (error) {
+              console.error(`Failed to archive room ${roomId}:`, error);
+            }
+          }
+        }, 60000); // 1-minute grace period
+      }
     } catch (error) {
       console.error('Error handling disconnect:', error);
       performanceMonitor.trackError(error, { action: 'disconnect' });
