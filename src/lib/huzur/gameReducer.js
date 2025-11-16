@@ -388,12 +388,17 @@ export function gameReducer(state, action) {
   }
   case 'HUMAN_EXCHANGE_TRUMP': {
     // Exchange 7 of trump for the trump card
-    const sevenOfTrump = state.hands.human.find(card => 
+    const sevenOfTrumpIndex = state.hands.human.findIndex(card => 
       card.rank === '7' && card.suit === state.trumpSuit
     );
     
-    if (!sevenOfTrump || !state.trumpCard) {
+    if (sevenOfTrumpIndex === -1 || !state.trumpCard) {
       return { ...state, log: [...state.log, `Cannot exchange: need 7 of trump and trump card must be available`] };
+    }
+    
+    // Prevent exchange if trump card has already been drawn
+    if (state.trumpCardDrawn) {
+      return { ...state, log: [...state.log, `Cannot exchange: trump card has already been drawn`] };
     }
     
     // Prevent exchange after deck is exhausted
@@ -401,15 +406,20 @@ export function gameReducer(state, action) {
       return { ...state, log: [...state.log, `Cannot exchange: deck is exhausted - no more cards to draw`] };
     }
     
-    const newHumanHand = state.hands.human.filter(card => card !== sevenOfTrump);
+    // Verify the trump card is still at the bottom of the deck
+    if (state.deck[0] !== state.trumpCard) {
+      return { ...state, log: [...state.log, `Cannot exchange: trump card is no longer at the bottom of the deck`] };
+    }
+    
+    // Remove the 7 of trump from hand using the same pattern as other card removals
+    const sevenOfTrump = state.hands.human[sevenOfTrumpIndex];
+    const newHumanHand = removeCardsFromHand(state.hands.human, [sevenOfTrumpIndex]);
     newHumanHand.push(state.trumpCard);
     
     let newLog = [...state.log, `You exchanged 7${suitToIcon(state.trumpSuit)} for ${formatCard(state.trumpCard)}`];
     
     // Exchanging the trump card counts as drawing it
-    if (!state.trumpCardDrawn) {
-      newLog = [...newLog, `5-card combos are now allowed!`];
-    }
+    newLog = [...newLog, `5-card combos are now allowed!`];
     
     // Update deck to replace trump card at bottom with the 7
     const newDeck = [...state.deck];

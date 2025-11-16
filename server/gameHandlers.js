@@ -145,8 +145,12 @@ function handleGameEvents(io, socket) {
   // 2️⃣ JOIN ROOM
   socket.on("join_room", async (data, ack) => {
     const { roomId, playerId } = data; // <— make sure client sends a stable playerId
-    console.log(`🎮 Player ${socket.id} (pid:${playerId}) attempting to join room: ${roomId}`);
+    const effectivePlayerId = playerId || socket.id;
+    
+    console.log(`🎮 Player ${socket.id} (pid:${effectivePlayerId}) attempting to join room: ${roomId}`);
     console.log(`📋 Available rooms:`, Object.keys(rooms));
+    console.log(`🔍 Socket to player mapping:`, socketToPlayerMap);
+    console.log(`🔍 Player to room mapping:`, playerRooms);
 
     const room = rooms[roomId];
     if (!room) {
@@ -161,7 +165,6 @@ function handleGameEvents(io, socket) {
     const gameState = room;
 
     // ✅ Check if the game is already started
-    const effectivePlayerId = playerId || socket.id;
     if (gameState.started && !gameState.hasPlayer(effectivePlayerId)) {
       console.log(`🚫 Game in room ${roomId} already started. Blocking new join.`);
       const fail = { ok: false, error: { message: "Game already started", code: 'GAME_ALREADY_STARTED' } };
@@ -591,8 +594,8 @@ function handleGameEvents(io, socket) {
     }
   });
 
-  // 7️⃣ GET ROOM STATE
-  socket.on("get_room_state", () => {
+  // 6️⃣ EXCHANGE TRUMP
+  socket.on("exchange_trump", async () => {
     try {
       const effectivePlayerId = getEffectivePlayerId(socket);
       
@@ -607,7 +610,57 @@ function handleGameEvents(io, socket) {
       }
       
       const gameState = rooms[roomId];
+      const result = gameState.exchangeTrump(effectivePlayerId);
+      
+      if (result.success) {
+        // Save to database
+        await gameDB.saveGameState(roomId, gameState.getState());
+        await gameDB.logAction(roomId, effectivePlayerId, 'trump_exchanged');
+        
+        // Broadcast per-player public state to all players
+        await broadcastPublicState(roomId, "update_state", gameState);
+        console.log(`🔄 ${effectivePlayerId} exchanged trump in room ${roomId}`);
+      } else {
+        socket.emit("server_error", { message: result.error });
+      }
+    } catch (error) {
+      console.error('Error exchanging trump:', error);
+      performanceMonitor.trackError(error, { action: 'exchange_trump' });
+      socket.emit("server_error", { message: "Failed to exchange trump" });
+    }
+  });
+
+  // 7️⃣ GET ROOM STATE
+  socket.on("get_room_state", () => {
+    try {
+      const effectivePlayerId = getEffectivePlayerId(socket);
+      console.log(`🔍 get_room_state: socket.id=${socket.id}, effectivePlayerId=${effectivePlayerId}`);
+      
+      // ✅ FIX: Try to find room using playerRooms mapping first (faster)
+      let roomId = playerRooms[effectivePlayerId];
+      
+      // If not found in mapping, search all rooms
+      if (!roomId) {
+        roomId = Object.keys(rooms).find(id => 
+          rooms[id].players.includes(effectivePlayerId)
+        );
+      }
+      
+      if (!roomId) {
+        console.warn(`⚠️ get_room_state: Player ${effectivePlayerId} (socket ${socket.id}) not in any room. Available rooms:`, Object.keys(rooms));
+        socket.emit("server_error", { message: "Not in any room" });
+        return;
+      }
+      
+      const gameState = rooms[roomId];
+      if (!gameState) {
+        console.error(`❌ get_room_state: Room ${roomId} not found in memory`);
+        socket.emit("server_error", { message: "Room state not found" });
+        return;
+      }
+      
       socket.emit("room_state", gameState.getPublicState(effectivePlayerId));
+      console.log(`✅ get_room_state: Sent state to ${effectivePlayerId} in room ${roomId}`);
     } catch (error) {
       console.error('Error getting room state:', error);
       performanceMonitor.trackError(error, { action: 'get_room_state' });
@@ -636,19 +689,32 @@ function handleGameEvents(io, socket) {
   socket.on("sync_state", async (data, ack) => {
     try {
       const effectivePlayerId = getEffectivePlayerId(socket);
+      console.log(`🔍 sync_state: socket.id=${socket.id}, effectivePlayerId=${effectivePlayerId}`);
       
-      // Find room for this player
-      const roomId = Object.keys(rooms).find(id => 
-        rooms[id].players.includes(effectivePlayerId)
-      );
+      // ✅ FIX: Try to find room using playerRooms mapping first (faster)
+      let roomId = playerRooms[effectivePlayerId];
+      
+      // If not found in mapping, search all rooms
+      if (!roomId) {
+        roomId = Object.keys(rooms).find(id => 
+          rooms[id].players.includes(effectivePlayerId)
+        );
+      }
       
       if (!roomId) {
+        console.warn(`⚠️ sync_state: Player ${effectivePlayerId} (socket ${socket.id}) not in any room. Available rooms:`, Object.keys(rooms));
         const fail = { ok: false, error: { message: "Not in any room" } };
         ack?.(fail);
         return;
       }
       
       const gameState = rooms[roomId];
+      if (!gameState) {
+        console.error(`❌ sync_state: Room ${roomId} not found in memory`);
+        const fail = { ok: false, error: { message: "Room state not found" } };
+        ack?.(fail);
+        return;
+      }
       
       // Get fresh state from database as backup
       const dbState = await gameDB.loadGameState(roomId);
@@ -657,6 +723,7 @@ function handleGameEvents(io, socket) {
       const currentState = gameState ? gameState.getPublicState(effectivePlayerId) : dbState;
       
       if (!currentState) {
+        console.error(`❌ sync_state: No state found for ${effectivePlayerId} in room ${roomId}`);
         const fail = { ok: false, error: { message: "Room state not found" } };
         ack?.(fail);
         return;
@@ -668,7 +735,7 @@ function handleGameEvents(io, socket) {
       // Send ACK response
       ack?.({ ok: true, data: currentState });
       
-      console.log(`🔄 State synced for ${effectivePlayerId} in room ${roomId}`);
+      console.log(`✅ sync_state: State synced for ${effectivePlayerId} in room ${roomId}`);
     } catch (error) {
       console.error('Error syncing state:', error);
       performanceMonitor.trackError(error, { action: 'sync_state' });

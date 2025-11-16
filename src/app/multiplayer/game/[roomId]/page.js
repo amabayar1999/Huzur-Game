@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { io } from 'socket.io-client';
 import ErrorBoundary from '../../../../components/ErrorBoundary';
 import CleanMultiplayerGame from '../../../../components/MultiplayerGame';
+import { generateUUID } from '../../../../lib/uuid';
 
 function MultiplayerGamePage() {
   const params = useParams();
@@ -47,17 +48,24 @@ function MultiplayerGamePage() {
           // Strategy 1: Request room state
           socket.emit('get_room_state');
           
-          // Strategy 2: Try to sync state
-          socket.emit('sync_state', {}, (response) => {
-            if (response && response.ok) {
-              console.log('✅ Sync state successful:', response.data);
-              setGameState(response.data);
-              setError(null);
-            } else {
-              console.error('❌ Sync state failed:', response);
-              setError('Failed to load game state. The room may not exist or the server may be unavailable.');
-            }
-          });
+          // Strategy 2: Try to sync state (only if we're connected and have a playerId)
+          if (playerId) {
+            socket.emit('sync_state', {}, (response) => {
+              if (response && response.ok) {
+                console.log('✅ Sync state successful:', response.data);
+                setGameState(response.data);
+                setError(null);
+              } else {
+                // ✅ FIX: Better error logging
+                const errorMsg = response?.error?.message || response?.message || 'Failed to sync state';
+                console.error('❌ Sync state failed:', errorMsg, 'Full response:', JSON.stringify(response, null, 2));
+                // Don't set error if it's just "Not in any room" - that's expected if join failed
+                if (errorMsg !== 'Not in any room') {
+                  setError('Failed to load game state. The room may not exist or the server may be unavailable.');
+                }
+              }
+            });
+          }
           
           // Strategy 3: If still no response after 3 more seconds, show error
           setTimeout(() => {
@@ -83,9 +91,15 @@ function MultiplayerGamePage() {
     socketSetupRef.current = true;
 
     // Generate or retrieve stable player ID (same as lobby)
-    let userId = localStorage.getItem("uid");
+    // ✅ FIX: Use same localStorage key as lobby for consistency
+    let userId = localStorage.getItem("playerId") || localStorage.getItem("uid");
     if (!userId) {
-      userId = crypto.randomUUID();
+      userId = generateUUID();
+      localStorage.setItem("playerId", userId);
+      localStorage.setItem("uid", userId); // Also set for backward compatibility
+    } else {
+      // Ensure both keys are set for consistency
+      localStorage.setItem("playerId", userId);
       localStorage.setItem("uid", userId);
     }
 
@@ -120,14 +134,14 @@ function MultiplayerGamePage() {
       setError(null);
       
       // Join room with proper ACK handling
-      console.log('🎮 Joining room:', roomId);
+      console.log('🎮 Joining room:', roomId, 'with playerId:', userId);
       newSocket.emit('join_room', { roomId, playerId: userId }, (res) => {
         if (!res || res.ok === false) {
-          console.error('❌ Failed to join room:', res);
-          const msg = (res && res.error && res.error.message) ? res.error.message : 'Failed to join room';
-          setError(msg);
-          // Fallback in case ACK was missed: ask for room state
-          newSocket.emit('get_room_state');
+          // ✅ FIX: Better error logging
+          const errorMsg = res?.error?.message || res?.message || 'Failed to join room';
+          console.error('❌ Failed to join room:', errorMsg, 'Full response:', JSON.stringify(res, null, 2));
+          setError(errorMsg);
+          // Don't try to get room state if we failed to join - the room might not exist
           return;
         }
         console.log('✅ Successfully joined room:', res.data);
@@ -213,11 +227,13 @@ function MultiplayerGamePage() {
     });
 
     // Only replace state when a private view is present to avoid wiping hand
+    // ✅ FIX: Also update if there's a winner (even if hand is empty/missing)
     const setIfPrivate = (data) => {
       const s = data?.gameState || data;
       const hasHand = Array.isArray(s?.hand);
       const hasScopedHands = s?.playerHands && Object.keys(s.playerHands).length > 0;
-      if (hasHand || hasScopedHands) {
+      const hasWinner = s?.winner !== undefined && s?.winner !== null;
+      if (hasHand || hasScopedHands || hasWinner) {
         setGameState(s);
       }
     };
@@ -294,11 +310,12 @@ function MultiplayerGamePage() {
 
     // Error handling (socket error event)
     newSocket.on('error', (data) => {
-      console.error('❌ Server error:', data);
-      const msg = (data && data.message) ? data.message : null;
-      if (msg) {
-        setError(msg);
-        if (msg.includes('Room not found')) {
+      // ✅ FIX: Better error logging
+      const errorMsg = data?.message || (typeof data === 'string' ? data : JSON.stringify(data));
+      console.error('❌ Server error:', errorMsg, 'Full error:', data);
+      if (errorMsg) {
+        setError(errorMsg);
+        if (errorMsg.includes('Room not found')) {
           setTimeout(() => {
             window.location.href = '/multiplayer';
           }, 2000);
@@ -308,10 +325,11 @@ function MultiplayerGamePage() {
 
     // Handle server errors with proper error codes
     newSocket.on('server_error', (data) => {
-      console.error('❌ Server error:', data);
-      const msg = (data && data.message) ? data.message : 'Server error occurred';
-      setError(msg);
-      if (msg.includes('Room not found')) {
+      // ✅ FIX: Better error logging
+      const errorMsg = data?.message || (typeof data === 'string' ? data : JSON.stringify(data));
+      console.error('❌ Server error:', errorMsg, 'Full error:', data);
+      setError(errorMsg);
+      if (errorMsg.includes('Room not found')) {
         setTimeout(() => {
           window.location.href = '/multiplayer';
         }, 2000);
@@ -390,7 +408,7 @@ function MultiplayerGamePage() {
             <div className="text-white">
               <h2 className="text-xl font-bold mb-2">❌ Error</h2>
               <p className="mb-4">{error}</p>
-              <div className="flex gap-3 justify-center">
+              <div className="flex gap-3 justify-center flex-wrap">
                 {isConnectionError && retryCount < 3 && (
                   <button 
                     onClick={retryConnection}
@@ -399,6 +417,15 @@ function MultiplayerGamePage() {
                     🔄 Retry Connection ({retryCount}/3)
                   </button>
                 )}
+                <button 
+                  onClick={() => {
+                    localStorage.removeItem("roomId");
+                    window.location.href = '/multiplayer';
+                  }}
+                  className="px-4 py-2 bg-yellow-500 text-white rounded-lg font-medium hover:bg-yellow-600 transition-colors"
+                >
+                  🧹 Clear Room & Go to Lobby
+                </button>
                 <button 
                   onClick={() => window.location.href = '/multiplayer'}
                   className="px-4 py-2 bg-white text-red-500 rounded-lg font-medium hover:bg-gray-100 transition-colors"
@@ -428,10 +455,27 @@ function MultiplayerGamePage() {
               Status: {connected ? 'Connected' : 'Connecting...'}
             </div>
             {loadingTimeout && (
-              <div className="text-sm text-yellow-400 mt-2">
+              <div className="text-sm text-yellow-400 mt-2 mb-4">
                 Taking longer than expected...
               </div>
             )}
+            <div className="mt-4 flex gap-3 justify-center">
+              <button 
+                onClick={() => {
+                  localStorage.removeItem("roomId");
+                  window.location.href = '/multiplayer';
+                }}
+                className="px-4 py-2 bg-yellow-500 text-white rounded-lg font-medium hover:bg-yellow-600 transition-colors"
+              >
+                🧹 Clear Room & Go to Lobby
+              </button>
+              <button 
+                onClick={() => window.location.href = '/multiplayer'}
+                className="px-4 py-2 bg-gray-600 text-white rounded-lg font-medium hover:bg-gray-700 transition-colors"
+              >
+                Back to Lobby
+              </button>
+            </div>
           </div>
         </main>
       </div>

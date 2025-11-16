@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import { generateUUID } from '../lib/uuid';
 
 export default function Lobby({ socket, playerId: propPlayerId }) {
   // 🪪 Persistent player identity - ensure stable playerId across sessions
@@ -10,7 +11,7 @@ export default function Lobby({ socket, playerId: propPlayerId }) {
     // Fallback: Get or create stable playerId from localStorage
     let storedPlayerId = localStorage.getItem("playerId");
     if (!storedPlayerId) {
-      storedPlayerId = crypto.randomUUID();
+      storedPlayerId = generateUUID();
       localStorage.setItem("playerId", storedPlayerId);
     }
     return storedPlayerId;
@@ -462,6 +463,28 @@ export default function Lobby({ socket, playerId: propPlayerId }) {
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-white mb-4">🎮 Huzur Multiplayer</h1>
           <p className="text-gray-300 text-lg">Clean Architecture - Server Authoritative</p>
+          
+          {/* Leave Room Button - Show if there's a stored room */}
+          {roomId && (
+            <div className="mt-4">
+              <button
+                onClick={() => {
+                  localStorage.removeItem("roomId");
+                  setRoomId('');
+                  setGameState(null);
+                  setError(null);
+                  // Leave the room on server if socket is connected
+                  if (socket) {
+                    socket.emit('leave_room');
+                  }
+                  window.location.reload();
+                }}
+                className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg"
+              >
+                🚪 Leave Room ({roomId})
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Error Display */}
@@ -687,6 +710,26 @@ export default function Lobby({ socket, playerId: propPlayerId }) {
                 }`}>
                   {isRoomOwner ? 'You' : 'Another Player'}
                 </span>
+              </div>
+              
+              {/* Leave Room Button */}
+              <div className="pt-4 border-t border-gray-600">
+                <button
+                  onClick={() => {
+                    localStorage.removeItem("roomId");
+                    setRoomId('');
+                    setGameState(null);
+                    setError(null);
+                    // Leave the room on server if socket is connected
+                    if (socket) {
+                      socket.emit('leave_room');
+                    }
+                    window.location.reload();
+                  }}
+                  className="w-full px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg"
+                >
+                  🚪 Leave Room
+                </button>
               </div>
             </div>
 

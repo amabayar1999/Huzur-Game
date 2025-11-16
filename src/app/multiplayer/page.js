@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import ErrorBoundary from '../../components/ErrorBoundary';
 import Lobby from '../../components/Lobby';
+import { generateUUID } from '../../lib/uuid';
 
 function MultiplayerLobby() {
   const [socket, setSocket] = useState(null);
@@ -15,7 +16,7 @@ function MultiplayerLobby() {
     // 🪪 Generate or retrieve stable player ID (consistent with Lobby)
     let userId = localStorage.getItem("playerId") || localStorage.getItem("uid");
     if (!userId) {
-      userId = crypto.randomUUID();
+      userId = generateUUID();
       localStorage.setItem("playerId", userId);
       // Also set uid for backward compatibility
       localStorage.setItem("uid", userId);

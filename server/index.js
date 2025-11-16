@@ -13,10 +13,13 @@ const io = new Server(server, {
     origin: [
       "http://localhost:3000", 
       "http://127.0.0.1:3000",
+      "http://localhost:3001",      // Added for alternate port
+      "http://127.0.0.1:3001",      // Added for alternate port
       "http://localhost:3006", 
       "http://127.0.0.1:3006",
       "http://10.56.81.235:3000",  // Phone access - Next.js app
-      "http://10.56.81.235:4000"   // Phone access - Socket.IO server
+      "http://10.56.81.235:4000",
+      "http://192.168.1.10:3000"   // Phone access - Socket.IO server
     ],
     methods: ["GET", "POST"],
     credentials: true,
