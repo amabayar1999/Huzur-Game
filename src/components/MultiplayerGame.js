@@ -4,7 +4,6 @@ import { useEffect, useState, useMemo } from 'react';
 import { formatCard, suitToIcon, sortCardsForDisplay, isTrump, isCombo } from '../lib/huzur/cards';
 import { COMBO_SIZES } from '../lib/huzur/constants';
 import Card from './Card';
-import Popup from './Popup';
 
 export default function CleanMultiplayerGame({ 
   socket, 
@@ -15,7 +14,6 @@ export default function CleanMultiplayerGame({
   const [selectedIdx, setSelectedIdx] = useState(null);
   const [selectedCombo, setSelectedCombo] = useState([]);
   const [error, setError] = useState(null);
-  const [showWinPopup, setShowWinPopup] = useState(false);
   // ✅ FIX: Removed starting state - game should only be started from Lobby
 
   // ✅ Fix: Use both playerHands[playerId] and hand property, with better null checking
@@ -73,15 +71,6 @@ export default function CleanMultiplayerGame({
       };
     }
   }, [socket]);
-
-  // Show win popup when there's a winner
-  useEffect(() => {
-    if (gameState?.winner) {
-      setShowWinPopup(true);
-    } else {
-      setShowWinPopup(false);
-    }
-  }, [gameState?.winner]);
 
   // Check if it's current player's turn
   const isMyTurn = gameState?.currentPlayer === playerId;
@@ -191,34 +180,8 @@ export default function CleanMultiplayerGame({
     setSelectedCombo([]);
   };
 
-  // Exchange trump - CLIENT ONLY SENDS INTENT
-  const handleExchangeTrump = () => {
-    if (!socket) return;
-    
-    setError(null);
-    socket.emit('exchange_trump');
-    setSelectedIdx(null);
-    setSelectedCombo([]);
-  };
-
-  // Handle closing win popup
-  const handleCloseWinPopup = () => {
-    setShowWinPopup(false);
-  };
-
-  // Handle restarting the game
-  const handleRestartGame = () => {
-    // Redirect back to lobby to start a new game
-    window.location.href = '/multiplayer';
-  };
-
   // Check if pickup is allowed (server will validate)
   const canPickup = gameState?.leadCard;
-  
-  // Check if player can exchange trump
-  const canExchangeTrump = gameState && gameState.trumpCard && (gameState.deckCount || gameState.deck?.length || 0) > 0 && playerHand.some(card => 
-    card.rank === '7' && card.suit === gameState.trumpSuit
-  );
   
   // Check if current selection is valid
   const isValidPlay = () => {
@@ -525,15 +488,6 @@ export default function CleanMultiplayerGame({
               >
                 📥 Pick Up
               </button>
-              {canExchangeTrump && (
-                <button 
-                  className="px-3 sm:px-4 lg:px-6 py-2 sm:py-2 lg:py-3 bg-gradient-to-r from-yellow-500 to-yellow-600 text-white rounded-xl font-bold shadow-lg hover:shadow-xl hover:scale-105 transition-all duration-200 text-xs sm:text-sm lg:text-base" 
-                  onClick={handleExchangeTrump}
-                  aria-label={`Exchange 7 of ${getSuitName(gameState.trumpSuit)} for trump card`}
-                >
-                  🔄 Exchange 7<span className={trumpSuitColor}>{trumpIcon}</span>
-                </button>
-              )}
             </div>
           )}
         </div>
@@ -563,12 +517,28 @@ export default function CleanMultiplayerGame({
               )}
             </div>
 
+            {/* Pile */}
+            <div className="flex items-center gap-2 px-3 py-2 bg-orange-50 border border-orange-200 rounded-lg">
+              <div className="text-sm font-semibold text-orange-800">📚 Pile:</div>
+              <div className="text-sm text-orange-600">{gameState.pile?.length || 0}</div>
+            </div>
+
             {/* Game Statistics */}
             {gameState.gameStats && (
               <>
+                <div className="flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="text-sm font-semibold text-green-800">🎯 Tricks:</div>
+                  <div className="text-sm text-green-600">{gameState.gameStats.totalTricks || 0}</div>
+                </div>
+
                 <div className="flex items-center gap-2 px-3 py-2 bg-purple-50 border border-purple-200 rounded-lg">
                   <div className="text-sm font-semibold text-purple-800">🃏 Played:</div>
                   <div className="text-sm text-purple-600">{gameState.gameStats.cardsPlayed?.[playerId] || 0}</div>
+                </div>
+
+                <div className="flex items-center gap-2 px-3 py-2 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <div className="text-sm font-semibold text-yellow-800">🎴 Combos:</div>
+                  <div className="text-sm text-yellow-600">{gameState.gameStats.combosPlayed?.[playerId] || 0}</div>
                 </div>
               </>
             )}
@@ -590,33 +560,15 @@ export default function CleanMultiplayerGame({
         </div>
       )}
 
-      {/* Win/Lose Popup */}
-      <Popup
-        isOpen={showWinPopup}
-        onClose={handleCloseWinPopup}
-        title={gameState?.winner === playerId ? '🎉 Congratulations! You Win! 🎉' : '😔 You Lose'}
-        message={gameState?.winner === playerId ? 'Great job! You played an excellent game!' : 'Better luck next time!'}
-        variant={gameState?.winner === playerId ? 'win' : 'lose'}
-      >
-        <div className="flex gap-4 justify-center">
-          <button
-            onClick={handleCloseWinPopup}
-            className="px-6 py-3 bg-gray-500 hover:bg-gray-600 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg transform hover:scale-105"
-          >
-            Close
-          </button>
-          <button
-            onClick={handleRestartGame}
-            className={`px-6 py-3 text-white rounded-lg font-medium transition-all duration-200 shadow-md hover:shadow-lg transform hover:scale-105 ${
-              gameState?.winner === playerId 
-                ? 'bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700' 
-                : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'
-            }`}
-          >
-            New Game
-          </button>
+      {/* Winner Display */}
+      {gameState.winner && (
+        <div className="w-full bg-green-500/90 backdrop-blur-sm rounded-xl shadow-lg border border-green-400/30 p-6 text-center">
+          <h2 className="text-2xl font-bold text-white mb-2">🎉 Game Over!</h2>
+          <p className="text-white text-lg">
+            {gameState.winner === playerId ? 'You Win!' : 'Another Player Wins!'}
+          </p>
         </div>
-      </Popup>
+      )}
     </div>
   );
 }

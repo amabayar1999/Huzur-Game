@@ -391,17 +391,12 @@ class GameState {
         }
       }
       
-      // Validate combo structure ONLY when leading
-      // When responding to a combo, structure doesn't matter - only position-by-position beating
-      if (!this.leadCard) {
-        // Leading with combo - must have valid structure (pairs + singles)
-        if (!isCombo(card)) {
-          return { success: false, error: "Invalid combo structure when leading - need at least one pair" };
-        }
+      // Validate combo structure
+      if (!isCombo(card)) {
+        return { success: false, error: "Invalid combo structure" };
       }
       
       // Validate combo play according to game rules
-      // This checks position-by-position beating when responding
       if (!canPlayCombo(this.leadCard, card, playerHand, this.trumpSuit)) {
         return { success: false, error: "Invalid combo play according to game rules" };
       }
@@ -445,24 +440,6 @@ class GameState {
     // Add to log
     this.addLog(`${playerId} played ${this.formatCard(card)}`);
 
-    // ✅ FIX: Check win condition immediately after removing card
-    const winner = this.checkWinCondition();
-    if (winner) {
-      this.winner = winner;
-      this.gameStats.gameEndTime = new Date();
-      this.gameStats.totalGameTime = this.gameStats.gameEndTime - this.gameStats.gameStartTime;
-      this.addLog(`🎉 ${winner} wins the game!`);
-      // ✅ FIX: Don't continue game flow if there's a winner
-      // Still need to handle the trick if responding, but don't set leadCard if leading
-      if (this.leadCard) {
-        // If responding, still resolve the trick (but game is over)
-        return this.resolveTrick(playerId, card);
-      } else {
-        // If leading, game is over - don't set leadCard or move turn
-        return { success: true };
-      }
-    }
-
     // Check if this completes a trick
     if (this.leadCard) {
       return this.resolveTrick(playerId, card);
@@ -503,24 +480,6 @@ class GameState {
     // Add to log
     this.addLog(`${playerId} played combo (${combo.length} cards)`);
 
-    // ✅ FIX: Check win condition immediately after removing cards
-    const winner = this.checkWinCondition();
-    if (winner) {
-      this.winner = winner;
-      this.gameStats.gameEndTime = new Date();
-      this.gameStats.totalGameTime = this.gameStats.gameEndTime - this.gameStats.gameStartTime;
-      this.addLog(`🎉 ${winner} wins the game!`);
-      // ✅ FIX: Don't continue game flow if there's a winner
-      // Still need to handle the trick if responding, but don't set leadCard if leading
-      if (this.leadCard) {
-        // If responding, still resolve the trick (but game is over)
-        return this.resolveTrick(playerId, combo);
-      } else {
-        // If leading, game is over - don't set leadCard or move turn
-        return { success: true };
-      }
-    }
-
     // Check if this completes a trick
     if (this.leadCard) {
       return this.resolveTrick(playerId, combo);
@@ -535,12 +494,6 @@ class GameState {
 
   // Resolve a trick
   resolveTrick(respondingPlayerId, responseCard) {
-    // ✅ FIX: Check if game already has a winner (shouldn't continue if game is over)
-    if (this.winner) {
-      this.addLog(`Game already ended - ${this.winner} won`);
-      return { success: true };
-    }
-    
     const leadCard = this.leadCard;
     const leadPlayerId = this.leadPlayer;
     
@@ -561,28 +514,16 @@ class GameState {
     this.gameStats.totalTricks++;
     this.gameStats.tricksWon[winnerId]++;
 
-    // ✅ FIX: Check win condition BEFORE drawing cards
+    // Check for win condition
     const winner = this.checkWinCondition();
     if (winner) {
       this.winner = winner;
       this.gameStats.gameEndTime = new Date();
       this.gameStats.totalGameTime = this.gameStats.gameEndTime - this.gameStats.gameStartTime;
       this.addLog(`🎉 ${winner} wins the game!`);
-      // Don't draw cards if game is over
-      this.addLog(`${winnerId} won the trick`);
-      return { success: true };
-    }
-    
-    // Draw cards to maintain hand size (only if game continues)
-    this.drawCardsToHandSize();
-    
-    // ✅ FIX: Check win condition again after drawing (in case drawing didn't happen but someone has 0 cards)
-    const winnerAfterDraw = this.checkWinCondition();
-    if (winnerAfterDraw && !this.winner) {
-      this.winner = winnerAfterDraw;
-      this.gameStats.gameEndTime = new Date();
-      this.gameStats.totalGameTime = this.gameStats.gameEndTime - this.gameStats.gameStartTime;
-      this.addLog(`🎉 ${winnerAfterDraw} wins the game!`);
+    } else {
+      // Draw cards to maintain hand size
+      this.drawCardsToHandSize();
     }
 
     this.addLog(`${winnerId} won the trick`);
@@ -593,9 +534,7 @@ class GameState {
   // Check win condition
   checkWinCondition() {
     for (const playerId of this.players) {
-      // ✅ FIX: Handle undefined/null hands safely
-      const hand = this.playerHands[playerId];
-      if (!hand || (Array.isArray(hand) && hand.length === 0)) {
+      if (this.playerHands[playerId].length === 0) {
         return playerId;
       }
     }
@@ -618,15 +557,6 @@ class GameState {
           this.addLog(`${playerId} drew ${this.formatCard(drawnCard)} - 5-card combos are now allowed!`);
         }
       }
-    }
-    
-    // ✅ FIX: Check win condition after drawing (in case any player's hand is empty)
-    const winner = this.checkWinCondition();
-    if (winner && !this.winner) {  // Only set if not already set
-      this.winner = winner;
-      this.gameStats.gameEndTime = new Date();
-      this.gameStats.totalGameTime = this.gameStats.gameEndTime - this.gameStats.gameStartTime;
-      this.addLog(`🎉 ${winner} wins the game!`);
     }
   }
 
@@ -682,85 +612,8 @@ class GameState {
     // Draw cards to maintain hand size for all players
     this.drawCardsToHandSize();
 
-    // ✅ FIX: Check win condition after pickup (in case lead player had 0 cards)
-    const winner = this.checkWinCondition();
-    if (winner) {
-      this.winner = winner;
-      this.gameStats.gameEndTime = new Date();
-      this.gameStats.totalGameTime = this.gameStats.gameEndTime - this.gameStats.gameStartTime;
-      this.addLog(`🎉 ${winner} wins the game!`);
-    }
-
     // Move to next player
     this.nextTurn();
-
-    return { success: true };
-  }
-
-  // Exchange 7 of trump for the trump card
-  exchangeTrump(playerId) {
-    // Comprehensive validation
-    if (!this.started) {
-      return { success: false, error: "Game not started" };
-    }
-
-    if (this.winner) {
-      return { success: false, error: "Game is already finished" };
-    }
-
-    if (!this.players.includes(playerId)) {
-      return { success: false, error: "Player not in game" };
-    }
-
-    // Exchange can happen on player's turn (not necessarily when it's their turn to play)
-    // But we'll allow it anytime during the game when conditions are met
-
-    const playerHand = this.playerHands[playerId];
-    if (!playerHand || playerHand.length === 0) {
-      return { success: false, error: "Player has no cards" };
-    }
-
-    // Check if player has 7 of trump
-    const sevenOfTrump = playerHand.find(card => 
-      card.rank === '7' && card.suit === this.trumpSuit
-    );
-
-    if (!sevenOfTrump) {
-      return { success: false, error: "You need 7 of trump to exchange" };
-    }
-
-    if (!this.trumpCard) {
-      return { success: false, error: "Trump card not available" };
-    }
-
-    // Prevent exchange after deck is exhausted
-    if (this.deck.length === 0) {
-      return { success: false, error: "Cannot exchange: deck is exhausted" };
-    }
-
-    // Remove 7 of trump from hand
-    const sevenIndex = playerHand.findIndex(card => 
-      card.rank === '7' && card.suit === this.trumpSuit
-    );
-    const newHand = [...playerHand];
-    newHand.splice(sevenIndex, 1);
-    
-    // Add trump card to hand
-    newHand.push(this.trumpCard);
-    this.playerHands[playerId] = newHand;
-
-    // Update deck to replace trump card at bottom with the 7
-    const newDeck = [...this.deck];
-    newDeck[0] = sevenOfTrump;
-
-    // Update game state
-    this.deck = newDeck;
-    this.trumpCard = sevenOfTrump;
-    this.trumpCardDrawn = true; // Trump card is now in play
-
-    // Add to log
-    this.addLog(`${playerId} exchanged 7${this.getSuitIcon(this.trumpSuit)} for ${this.formatCard(this.trumpCard)}`);
-    this.addLog(`5-card combos are now allowed!`);
 
     return { success: true };
   }

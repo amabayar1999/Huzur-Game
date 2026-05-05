@@ -214,7 +214,7 @@ function CardGameInner() {
   };
 
   // Check if player can exchange trump
-  const canExchangeTrump = state && state.trumpCard && state.deck.length > 0 && !state.trumpCardDrawn && state.hands.human.some(card => 
+  const canExchangeTrump = state && state.trumpCard && state.deck.length > 0 && state.hands.human.some(card => 
     card.rank === '7' && card.suit === state.trumpSuit
   );
 
